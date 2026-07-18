@@ -95,7 +95,16 @@ async function franceTravail(): Promise<{ items: WatchItem[]; state: SourceState
   if (!clientId || !clientSecret) return { items: [], state: { source: "France Travail", status: "api", count: 0, detail: "Identifiants OAuth requis", checkedAt } };
   const body = new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret, scope: "api_offresdemploiv2 o2dsoffre" });
   const tokenResponse = await fetch("https://entreprise.francetravail.fr/connexion/oauth2/access_token?realm=/partenaire", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
-  if (!tokenResponse.ok) throw new Error(`OAuth France Travail ${tokenResponse.status}`);
+  if (!tokenResponse.ok) {
+    const detail = tokenResponse.status === 401
+      ? "Identifiants OAuth refusés"
+      : tokenResponse.status === 403
+        ? "API Offres d’emploi non autorisée pour cette application"
+        : tokenResponse.status === 400
+          ? "Droits ou périmètre OAuth invalides"
+          : `Service OAuth indisponible (HTTP ${tokenResponse.status})`;
+    throw new Error(detail);
+  }
   const token = (await tokenResponse.json()).access_token;
   const params = new URLSearchParams({ latitude: "44.5007", longitude: "0.1654", distance: "70", range: "0-99", sort: "1" });
   const response = await fetch(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
@@ -142,7 +151,7 @@ export async function GET() {
     return { source: tasks[index].source, status: "error", count: 0, detail: "Source temporairement indisponible", checkedAt };
   });
   try { const ft = await franceTravail(); items.push(...ft.items); sources.push(ft.state); }
-  catch { sources.push({ source: "France Travail", status: "error", count: 0, detail: "Connexion API en échec", checkedAt }); }
+  catch (error) { sources.push({ source: "France Travail", status: "error", count: 0, detail: error instanceof Error ? error.message : "Connexion API en échec", checkedAt }); }
   sources.push({ source: "Légifrance PISTE", status: "api", count: 0, detail: "Identifiants API requis avant activation", checkedAt });
   items.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   return Response.json({ items, sources, checkedAt }, { headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=900" } });
