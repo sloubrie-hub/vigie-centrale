@@ -42,8 +42,10 @@ export default function Home() {
   const [activeTheme, setActiveTheme] = useState<Theme | "Tous">("Tous");
   const [query, setQuery] = useState("");
   const [saved, setSaved] = useState<(number | string)[]>([]);
-  const [view, setView] = useState<"feed" | "sources">("feed");
+  const [view, setView] = useState<"feed" | "archive" | "sources">("feed");
   const [liveItems, setLiveItems] = useState<Item[]>([]);
+  const [archivedItems, setArchivedItems] = useState<Item[]>([]);
+  const [archiveLoading, setArchiveLoading] = useState(false);
   const [sourceStates, setSourceStates] = useState<{source:string;status:"live"|"api"|"error";count:number;detail:string}[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
@@ -77,12 +79,28 @@ export default function Home() {
 
   const toggleSave = (id: number | string) => setSaved((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
 
+  const openArchive = async () => {
+    setView("archive"); setArchiveLoading(true);
+    try {
+      const response = await fetch("/api/archive", { cache: "no-store" });
+      const data = await response.json();
+      setArchivedItems(data.items || []);
+    } finally { setArchiveLoading(false); }
+  };
+
+  const archiveVisible = archivedItems.filter((item) => {
+    const themeOk = activeTheme === "Tous" || item.theme === activeTheme;
+    const q = query.trim().toLowerCase();
+    return themeOk && (!q || `${item.title} ${item.summary} ${item.tags.join(" ")}`.toLowerCase().includes(q));
+  });
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">V</span><div><strong>Vigie Centrale</strong><small>Veille personnelle</small></div></div>
         <nav aria-label="Navigation principale">
           <button className={view === "feed" ? "nav-item active" : "nav-item"} onClick={() => setView("feed")}><span>▦</span> Vue d’ensemble</button>
+          <button className={view === "archive" ? "nav-item active" : "nav-item"} onClick={openArchive}><span>▤</span> Archives</button>
           <button className={view === "sources" ? "nav-item active" : "nav-item"} onClick={() => setView("sources")}><span>⌘</span> Sources & connexions</button>
         </nav>
         <div className="theme-nav">
@@ -122,6 +140,18 @@ export default function Home() {
               <div className="card-meta"><span>{item.theme}</span><time>{new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }).format(new Date(item.date))}</time><em className={`priority p-${item.priority.toLowerCase().replace("à ","")}`}>{item.priority}</em></div>
               <h2>{item.title}</h2><p>{item.summary}</p>
               <div className="tags">{item.tags.map(tag => <span key={tag}>{tag}</span>)}</div>
+              <div className="card-footer"><span>Source : <strong>{item.source}</strong></span><a href={item.url} target="_blank" rel="noreferrer">Consulter la source ↗</a></div>
+            </article>)}
+          </section>
+        </div> : view === "archive" ? <div className="content">
+          <section className="hero compact"><div><p className="eyebrow">MÉMOIRE DE LA VEILLE</p><h1>Archives</h1><p>Les publications collectées restent consultables même après leur disparition des flux d’origine.</p></div><div className="hero-metric"><span>Conservés</span><strong>{archiveVisible.length}</strong><small>éléments archivés</small></div></section>
+          <div className="filters"><span className="chip active">Historique persistant</span><button className="refresh" onClick={openArchive} disabled={archiveLoading}>{archiveLoading ? "Chargement…" : "Rafraîchir ↻"}</button><span>Utilisez la recherche et les thèmes pour filtrer</span></div>
+          <section className="feed">
+            {!archiveLoading && archiveVisible.length === 0 && <div className="empty"><strong>Archive vide</strong><p>Les premières publications seront conservées dès que la base PostgreSQL sera connectée.</p></div>}
+            {archiveVisible.map((item) => <article className="watch-card live" key={`archive-${item.id}`}>
+              <div className="card-rail"><span className="source-state live">Archivé</span><button className={saved.includes(item.id) ? "save saved" : "save"} onClick={() => toggleSave(item.id)} aria-label="Enregistrer">{saved.includes(item.id) ? "★" : "☆"}</button></div>
+              <div className="card-meta"><span>{item.theme}</span><time>{new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", year: "numeric" }).format(new Date(item.date))}</time><em className={`priority p-${item.priority.toLowerCase().replace("à ","")}`}>{item.priority}</em></div>
+              <h2>{item.title}</h2><p>{item.summary}</p><div className="tags">{item.tags.map(tag => <span key={tag}>{tag}</span>)}</div>
               <div className="card-footer"><span>Source : <strong>{item.source}</strong></span><a href={item.url} target="_blank" rel="noreferrer">Consulter la source ↗</a></div>
             </article>)}
           </section>
