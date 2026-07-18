@@ -13,7 +13,7 @@ type WatchItem = {
 
 type SourceState = { source: string; status: "live" | "api" | "error"; count: number; detail: string; checkedAt: string };
 type BlizzardEntry = { contentId: string; properties?: { title?: string; category?: string; summary?: string; lastUpdated?: string; publishDate?: string; newsUrl?: string } };
-type FranceOffer = { id: string; intitule: string; description?: string; dateCreation?: string; typeContrat?: string; lieuTravail?: { libelle?: string }; entreprise?: { nom?: string }; origineOffre?: { urlOrigine?: string } };
+type FranceOffer = { id: string; intitule: string; description?: string; dateCreation?: string; typeContrat?: string; lieuTravail?: { libelle?: string; codePostal?: string }; entreprise?: { nom?: string }; origineOffre?: { urlOrigine?: string } };
 
 const clean = (value = "") => value
   .replace(/<!\[CDATA\[|\]\]>/g, "")
@@ -106,11 +106,16 @@ async function franceTravail(): Promise<{ items: WatchItem[]; state: SourceState
     throw new Error(detail);
   }
   const token = (await tokenResponse.json()).access_token;
-  const params = new URLSearchParams({ latitude: "44.5007", longitude: "0.1654", distance: "70", range: "0-99", sort: "1" });
-  const response = await fetch(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
-  if (!response.ok) throw new Error(`API France Travail ${response.status}`);
-  const data = await response.json();
-  const relevant = ((data.resultats || []) as FranceOffer[]).filter((offer) => /insertion|conseiller.*emploi|accompagnement.*professionnel|référent.*insertion|chargé.*insertion|mission locale|formateur.*insertion/i.test(`${offer.intitule} ${offer.description}`)).slice(0, 12);
+  const searches = [
+    new URLSearchParams({ departement: "47", range: "0-149", sort: "1" }),
+    new URLSearchParams({ commune: "33227", distance: "45", range: "0-149", sort: "1" }),
+  ];
+  const responses = await Promise.all(searches.map((params) => fetch(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } })));
+  if (responses.some((response) => !response.ok)) throw new Error(`API France Travail ${responses.find((response) => !response.ok)?.status}`);
+  const payloads = await Promise.all(responses.map((response) => response.json()));
+  const allOffers = payloads.flatMap((data) => (data.resultats || []) as FranceOffer[]);
+  const uniqueOffers = [...new Map(allOffers.map((offer) => [offer.id, offer])).values()];
+  const relevant = uniqueOffers.filter((offer) => /insertion|conseiller.*emploi|accompagnement.*professionnel|référent.*insertion|chargé.*insertion|mission locale|formateur.*insertion|éducateur.*spécialisé|orientation professionnelle/i.test(offer.intitule)).slice(0, 20);
   const items = relevant.map((offer) => ({
     id: `ft-${offer.id}`, theme: "Emploi" as const, kind: "live" as const, date: offer.dateCreation || checkedAt,
     title: offer.intitule, summary: clean(offer.description).slice(0, 280), source: "France Travail — API officielle",
@@ -118,7 +123,7 @@ async function franceTravail(): Promise<{ items: WatchItem[]; state: SourceState
     priority: /Marmande|La Réole|Langon/i.test(offer.lieuTravail?.libelle || "") ? "Haute" as const : "Moyenne" as const,
     tags: [offer.lieuTravail?.libelle, offer.typeContrat, offer.entreprise?.nom].filter((tag): tag is string => Boolean(tag)),
   }));
-  return { items, state: { source: "France Travail", status: "live", count: items.length, detail: "API officielle — rayon de 70 km autour de Marmande", checkedAt } };
+  return { items, state: { source: "France Travail", status: "live", count: items.length, detail: "API officielle — Lot-et-Garonne et secteur de Langon", checkedAt } };
 }
 
 export async function GET() {
