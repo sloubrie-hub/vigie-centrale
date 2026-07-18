@@ -1,3 +1,5 @@
+import { archiveItems } from "@/lib/archive";
+
 type WatchItem = {
   id: string;
   theme: "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets";
@@ -159,5 +161,8 @@ export async function GET() {
   catch (error) { sources.push({ source: "France Travail", status: "error", count: 0, detail: error instanceof Error ? error.message : "Connexion API en échec", checkedAt }); }
   sources.push({ source: "Légifrance PISTE", status: "api", count: 0, detail: "Identifiants API requis avant activation", checkedAt });
   items.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-  return Response.json({ items, sources, checkedAt }, { headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=900" } });
+  let archive = { enabled: false, stored: 0 };
+  try { archive = await archiveItems(items); }
+  catch { sources.push({ source: "Archives PostgreSQL", status: "error", count: 0, detail: "Archivage temporairement indisponible", checkedAt }); }
+  return Response.json({ items, sources, checkedAt, archive }, { headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=900" } });
 }
