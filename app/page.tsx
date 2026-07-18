@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 type Theme = "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets";
-type DataKind = "live" | "api" | "demo";
+type DataKind = "live";
 
 type Item = {
   id: number | string;
@@ -26,30 +26,20 @@ const themes: { name: Theme; icon: string; color: string }[] = [
   { name: "Tech & gadgets", icon: "⌁", color: "cyan" },
 ];
 
-const demoItems: Item[] = [
-  { id: 1, theme: "Emploi", kind: "demo", date: "2026-07-18T08:30:00", title: "Conseiller en insertion professionnelle — Marmande", summary: "Exemple de fiche destinée à tester le classement géographique, la pertinence et le suivi des candidatures.", source: "France Travail", url: "https://www.francetravail.fr/", priority: "Haute", tags: ["Marmande", "CDD", "CIP"] },
-  { id: 2, theme: "Diablo 4", kind: "demo", date: "2026-07-18T07:45:00", title: "Mise à jour d’équilibrage — impact sur les builds", summary: "Carte de démonstration du futur résumé croisé entre notes officielles et analyses de créateurs reconnus.", source: "Blizzard / Maxroll", url: "https://news.blizzard.com/fr-fr/diablo4", priority: "Haute", tags: ["Patch", "Builds", "Saison"] },
-  { id: 3, theme: "CIP & réglementation", kind: "demo", date: "2026-07-17T17:20:00", title: "Évolution d’un dispositif d’accompagnement", summary: "Exemple d’alerte réglementaire avec résumé opérationnel, date d’effet et conséquences pour la pratique du conseiller.", source: "Légifrance", url: "https://www.legifrance.gouv.fr/", priority: "Haute", tags: ["Réglementation", "Pratique"] },
-  { id: 4, theme: "Hearthstone", kind: "demo", date: "2026-07-17T14:05:00", title: "Battlegrounds : tendances de la méta", summary: "Exemple de synthèse des héros, compositions et anomalies de performance à surveiller.", source: "Blizzard / HSReplay", url: "https://hearthstone.blizzard.com/fr-fr/news", priority: "Moyenne", tags: ["Battlegrounds", "Méta"] },
-  { id: 5, theme: "Tech & gadgets", kind: "demo", date: "2026-07-16T11:30:00", title: "Un outil d’automatisation à évaluer", summary: "Fiche de test pour comparer utilité réelle, prix, confidentialité, limites et risque d’effet gadget.", source: "Source à qualifier", url: "https://www.theverge.com/tech", priority: "À lire", tags: ["IA", "Automatisation"] },
-  { id: 6, theme: "Emploi", kind: "api", date: "2026-07-16T09:00:00", title: "Connecteur Offres d’emploi v2", summary: "Cette source nécessite des identifiants API France Travail avant de pouvoir afficher des offres en direct.", source: "France Travail API", url: "https://francetravail.io/", priority: "Moyenne", tags: ["API requise", "Lot-et-Garonne"] },
-];
-
 const sourceRows = [
   ["Blizzard News", "Diablo 4 / Hearthstone", "Live public", "RSS ou lecture officielle", "Prête à brancher"],
   ["YouTube — 7 créateurs", "Diablo 4 / Hearthstone", "Live public", "Flux officiels des chaînes", "Connecté"],
-  ["France Travail", "Offres d’emploi", "API requise", "OAuth + API Offres v2", "Identifiants requis"],
+  ["France Travail", "Offres d’emploi", "Live officiel", "OAuth + API Offres v2", "Connecté"],
   ["Légifrance", "Réglementation", "Live public / API", "Flux officiels + PISTE", "À cadrer"],
   ["Missions Locales / collectivités", "CIP & emploi", "Live public", "Pages carrières et actualités", "À référencer"],
   ["Maxroll / créateurs experts", "Diablo 4", "Public, non officiel", "Sélection éditoriale", "À qualifier"],
   ["Sites tech reconnus", "Tech & gadgets", "Public, non officiel", "RSS + liste blanche", "À qualifier"],
 ];
 
-const labels: Record<DataKind, string> = { live: "Donnée live", api: "API requise", demo: "Démonstration" };
+const labels: Record<DataKind, string> = { live: "Donnée live" };
 
 export default function Home() {
   const [activeTheme, setActiveTheme] = useState<Theme | "Tous">("Tous");
-  const [activeKind, setActiveKind] = useState<DataKind | "all">("all");
   const [query, setQuery] = useState("");
   const [saved, setSaved] = useState<(number | string)[]>([]);
   const [view, setView] = useState<"feed" | "sources">("feed");
@@ -57,7 +47,7 @@ export default function Home() {
   const [sourceStates, setSourceStates] = useState<{source:string;status:"live"|"api"|"error";count:number;detail:string}[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<string | null>(null);
-  const items = useMemo(() => [...liveItems, ...demoItems], [liveItems]);
+  const items = liveItems;
 
   const refresh = async () => {
     setLoading(true);
@@ -80,11 +70,10 @@ export default function Home() {
 
   const visible = useMemo(() => items.filter((item) => {
     const themeOk = activeTheme === "Tous" || item.theme === activeTheme;
-    const kindOk = activeKind === "all" || item.kind === activeKind;
     const q = query.trim().toLowerCase();
     const queryOk = !q || `${item.title} ${item.summary} ${item.tags.join(" ")}`.toLowerCase().includes(q);
-    return themeOk && kindOk && queryOk;
-  }), [activeTheme, activeKind, query, items]);
+    return themeOk && queryOk;
+  }), [activeTheme, query, items]);
 
   const toggleSave = (id: number | string) => setSaved((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
 
@@ -118,11 +107,11 @@ export default function Home() {
           </section>
 
           <section className="integrity-banner">
-            <div className="shield">✓</div><div><strong>Mode de transparence activé</strong><p>Le contenu affiché aujourd’hui sert à valider l’application. Chaque carte indique clairement son statut ; aucune donnée fictive n’est présentée comme une information en direct.</p></div>
+            <div className="shield">✓</div><div><strong>100 % données collectées</strong><p>Le flux principal affiche uniquement des informations issues des sources connectées. Aucun contenu de démonstration n’est injecté.</p></div>
           </section>
 
           <div className="filters" aria-label="Filtrer par type de donnée">
-            {[{k:"all",l:"Tout"},{k:"live",l:"Live"},{k:"api",l:"API requise"},{k:"demo",l:"Démonstration"}].map(x => <button key={x.k} className={activeKind === x.k ? "chip active" : "chip"} onClick={() => setActiveKind(x.k as DataKind | "all")}>{x.l}</button>)}
+            <span className="chip active">Données live</span>
             <button className="refresh" onClick={refresh} disabled={loading}>{loading ? "Collecte…" : "Actualiser ↻"}</button><span>{visible.length} élément{visible.length > 1 ? "s" : ""}</span>
           </div>
 
