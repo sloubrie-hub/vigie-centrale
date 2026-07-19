@@ -6,7 +6,8 @@ const source = (overrides = {}) => ({
   id: "france-travail", name: "France Travail", theme: "Emploi",
   connectorType: "france_travail", active: true, ...overrides,
 });
-const run = (status, day, errorMessage = null) => ({
+const run = (status, day, errorMessage = null, collectionRunId = "run-1") => ({
+  collectionRunId,
   status,
   startedAt: `2026-07-${String(day).padStart(2, "0")}T08:00:00.000Z`,
   finishedAt: `2026-07-${String(day).padStart(2, "0")}T08:00:01.000Z`,
@@ -86,6 +87,38 @@ test("une source requise en erreur rend son domaine inexploitable", () => {
   const result = assessDataReliability(collection(), [failed], ["france-travail"]);
   assert.equal(result.status, "unusable");
   assert.equal(result.analysisReady, false);
+});
+
+test("une source requise absente du registre rend le domaine inexploitable", () => {
+  const result = assessDataReliability(collection(), [], ["france-travail"]);
+  assert.equal(result.status, "unusable");
+  assert.equal(result.analysisReady, false);
+  assert.deepEqual(result.reasons, ["Source requise absente : France Travail/france-travail"]);
+});
+
+test("une source requise inactive rend le domaine inexploitable sans devenir une panne", () => {
+  const inactive = calculateSourceHealth(source({ active: false }), []);
+  const result = assessDataReliability(collection(), [inactive], ["france-travail"]);
+  assert.equal(inactive.status, "inactive");
+  assert.equal(result.status, "unusable");
+  assert.equal(result.analysisReady, false);
+  assert.deepEqual(result.reasons, ["Source requise inactive : France Travail"]);
+});
+
+test("un ancien succès ne remplace pas la participation au dernier run", () => {
+  const historical = calculateSourceHealth(source(), [run("completed", 18, null, "run-0")]);
+  const result = assessDataReliability(collection(), [historical], ["france-travail"]);
+  assert.equal(historical.status, "healthy");
+  assert.equal(result.status, "unusable");
+  assert.equal(result.analysisReady, false);
+  assert.deepEqual(result.reasons, ["Source requise absente de la dernière collecte : France Travail"]);
+});
+
+test("une source requise saine ayant participé au dernier run est exploitable", () => {
+  const current = calculateSourceHealth(source(), [run("completed", 19)]);
+  const result = assessDataReliability(collection(), [current], ["france-travail"]);
+  assert.equal(result.status, "reliable");
+  assert.equal(result.analysisReady, true);
 });
 
 test("l'absence de collecte reste un état explicite", () => {

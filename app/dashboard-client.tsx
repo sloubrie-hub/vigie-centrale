@@ -47,6 +47,7 @@ type SourceState = {
   successRate: number | null;
   durationMs: number | null;
   recentError: string | null;
+  lastCollectionRunId: string | null;
 };
 
 type Reliability = { status: ReliabilityStatus; analysisReady: boolean; reasons: string[] };

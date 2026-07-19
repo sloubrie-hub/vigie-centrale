@@ -9,6 +9,7 @@ import type {
 export const HEALTH_WINDOW_SIZE = 10;
 
 export type SourceRunObservation = {
+  collectionRunId: string;
   status: SourceRunStatus;
   startedAt: string;
   finishedAt: string;
@@ -75,7 +76,14 @@ export function calculateSourceHealth(
     successRate,
     durationMs: latest?.durationMs ?? null,
     recentError,
+    lastCollectionRunId: latest?.collectionRunId || null,
   };
+}
+
+function requiredSourceLabel(id: string, source?: SourceHealth) {
+  if (source) return source.source;
+  const readableId = id.split("-").map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`).join(" ");
+  return `${readableId}/${id}`;
 }
 
 export function assessDataReliability(
@@ -91,11 +99,30 @@ export function assessDataReliability(
     return { status: "unusable", analysisReady: false, reasons: ["Collecte échouée"] };
   }
 
+  const reasons: string[] = [];
+  if (collection.status === "partial") reasons.push("Collecte partielle");
+
+  if (requiredSourceIds) {
+    const registeredById = new Map(sources.map((source) => [source.id, source]));
+    const missing = requiredSourceIds.filter((id) => !registeredById.has(id));
+    const inactive = requiredSourceIds
+      .map((id) => registeredById.get(id))
+      .filter((source): source is SourceHealth => Boolean(source && !source.active));
+    const absentFromRun = requiredSourceIds
+      .map((id) => registeredById.get(id))
+      .filter((source): source is SourceHealth => Boolean(source?.active && source.lastCollectionRunId !== collection.id));
+
+    reasons.push(...missing.map((id) => `Source requise absente : ${requiredSourceLabel(id)}`));
+    reasons.push(...inactive.map((source) => `Source requise inactive : ${requiredSourceLabel(source.id, source)}`));
+    reasons.push(...absentFromRun.map((source) => `Source requise absente de la dernière collecte : ${requiredSourceLabel(source.id, source)}`));
+    if (missing.length > 0 || inactive.length > 0 || absentFromRun.length > 0) {
+      return { status: "unusable", analysisReady: false, reasons };
+    }
+  }
+
   const scope = sources.filter((source) => source.active && (!requiredSourceIds || requiredSourceIds.includes(source.id)));
   const errors = scope.filter((source) => source.status === "error");
   const degraded = scope.filter((source) => source.status === "degraded");
-  const reasons: string[] = [];
-  if (collection.status === "partial") reasons.push("Collecte partielle");
   if (errors.length > 0) reasons.push(`Sources en erreur : ${errors.map((source) => source.source).join(", ")}`);
   if (degraded.length > 0) reasons.push(`Sources dégradées : ${degraded.map((source) => source.source).join(", ")}`);
 

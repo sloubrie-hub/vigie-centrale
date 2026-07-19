@@ -42,6 +42,7 @@ export type SourceHealth = {
   successRate: number | null;
   durationMs: number | null;
   recentError: string | null;
+  lastCollectionRunId: string | null;
 };
 
 export type DataReliability = {

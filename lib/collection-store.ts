@@ -105,11 +105,11 @@ export async function readCollectionState(): Promise<{ collection: CollectionSum
       FROM collection_runs ORDER BY started_at DESC LIMIT 1`;
     sourceRows = await sql`
       SELECT s.id, s.name, s.theme, s.connector_type, s.active,
-        rr.status, rr.started_at, rr.finished_at, rr.items_collected,
+        rr.collection_run_id, rr.status, rr.started_at, rr.finished_at, rr.items_collected,
         rr.duration_ms, rr.error_message, ls.last_success_at, le.last_error_message
       FROM sources s
       LEFT JOIN LATERAL (
-        SELECT status, started_at, finished_at, items_collected, duration_ms, error_message
+        SELECT collection_run_id, status, started_at, finished_at, items_collected, duration_ms, error_message
         FROM source_runs WHERE source_id = s.id ORDER BY finished_at DESC LIMIT ${HEALTH_WINDOW_SIZE}
       ) rr ON TRUE
       LEFT JOIN LATERAL (
@@ -142,6 +142,7 @@ export async function readCollectionState(): Promise<{ collection: CollectionSum
     };
     if (row.status && row.finished_at) {
       entry.observations.push({
+        collectionRunId: String(row.collection_run_id),
         status: String(row.status) as SourceRunStatus,
         startedAt: new Date(String(row.started_at)).toISOString(),
         finishedAt: new Date(String(row.finished_at)).toISOString(),
