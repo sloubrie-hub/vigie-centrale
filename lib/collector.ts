@@ -1,96 +1,38 @@
 import { archiveItems, finishCollectionRun, recordSourceRun, registerSources, startCollectionRun } from "@/lib/collection-store";
+import { executeCollectorTasks, type CollectorTask } from "@/lib/collector-runner";
 import { deriveCollectionStatus, summarizeSourceResults } from "@/lib/collection-status";
+import { CollectorDiagnosticError, requestJson, requestText } from "@/lib/http-client";
+import { parseRssFeed, parseYoutubeFeed } from "@/lib/xml-feeds";
 import type { SourceDefinition, WatchItem, WatchTheme } from "@/lib/watch-types";
 
 type BlizzardEntry = { contentId: string; properties?: { title?: string; category?: string; summary?: string; lastUpdated?: string; publishDate?: string; newsUrl?: string } };
 type FranceOffer = { id: string; intitule: string; description?: string; dateCreation?: string; typeContrat?: string; lieuTravail?: { libelle?: string; codePostal?: string }; entreprise?: { nom?: string }; origineOffre?: { urlOrigine?: string } };
-type CollectorTask = { source: SourceDefinition; run: () => Promise<WatchItem[]> };
-
-const HTTP_TIMEOUT_MS = 8_000;
-const SOURCE_TIMEOUT_MS = 20_000;
 
 const clean = (value = "") => value
   .replace(/<!\[CDATA\[|\]\]>/g, "").replace(/<[^>]+>/g, " ")
   .replace(/&nbsp;|&#160;/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"')
   .replace(/&#39;|&apos;/g, "'").replace(/\s+/g, " ").trim();
 
-const between = (input: string, tag: string) => {
-  const match = input.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
-  return clean(match?.[1]);
-};
-
-async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = HTTP_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") throw new Error(`Délai dépassé après ${timeoutMs / 1000} s`);
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function fetchText(url: string) {
-  const response = await fetchWithTimeout(url, { headers: { "User-Agent": "Vigie-Centrale/1.0" } });
-  return response.text();
-}
-
-async function withSourceTimeout<T>(operation: Promise<T>, timeoutMs = SOURCE_TIMEOUT_MS): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error(`Collecteur interrompu après ${timeoutMs / 1000} s`)), timeoutMs); }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function parseRss(xml: string, source: string, theme: WatchTheme, tags: string[], limit = 5): WatchItem[] {
-  return [...xml.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)].slice(0, limit).map((match, index) => {
-    const item = match[1];
-    const link = between(item, "link") || item.match(/<link[^>]+href=["']([^"']+)/i)?.[1] || "";
-    const dateRaw = between(item, "pubDate") || between(item, "dc:date") || between(item, "updated");
-    const description = between(item, "description") || between(item, "content:encoded");
-    return {
-      id: `${source}-${index}-${link}`, theme, kind: "live" as const,
-      date: dateRaw && !Number.isNaN(Date.parse(dateRaw)) ? new Date(dateRaw).toISOString() : new Date().toISOString(),
-      title: between(item, "title") || "Nouvelle publication", summary: description.slice(0, 260),
-      source, url: link, priority: (theme === "CIP & réglementation" ? "Moyenne" : "À lire") as WatchItem["priority"], tags,
-    };
-  }).filter((item) => item.url && item.title);
-}
-
-function parseYoutube(xml: string, creator: string, theme: WatchTheme, limit = 2): WatchItem[] {
-  return [...xml.matchAll(/<entry(?:\s[^>]*)?>([\s\S]*?)<\/entry>/gi)].slice(0, limit).map((match) => {
-    const entry = match[1];
-    const videoId = between(entry, "yt:videoId");
-    const url = entry.match(/<link[^>]+rel=["']alternate["'][^>]+href=["']([^"']+)/i)?.[1]
-      || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : "");
-    const published = between(entry, "published") || between(entry, "updated");
-    return {
-      id: `youtube-${videoId || creator}-${published}`, theme, kind: "live" as const,
-      date: published && !Number.isNaN(Date.parse(published)) ? new Date(published).toISOString() : new Date().toISOString(),
-      title: between(entry, "title") || "Nouvelle vidéo", summary: `Nouvelle vidéo publiée par ${creator}.`,
-      source: `${creator} — YouTube`, url, priority: "À lire" as const, tags: ["YouTube", "Créateur", creator],
-    };
-  }).filter((item) => item.url && item.title);
-}
-
 async function blizzard(product: "diablo-4" | "hearthstone", theme: WatchTheme): Promise<WatchItem[]> {
-  const data = JSON.parse(await fetchText(`https://news.blizzard.com/api/feed/${product}`));
-  return ((data.contentItems || []) as BlizzardEntry[]).slice(0, 6).map((entry) => {
+  const label = `Blizzard ${product === "diablo-4" ? "Diablo IV" : "Hearthstone"}`;
+  const data = await requestJson<{ contentItems?: unknown }>(`https://news.blizzard.com/api/feed/${product}`, {
+    label,
+    headers: { "User-Agent": "Vigie-Centrale/1.0", Accept: "application/json" },
+  });
+  if (!data || !Array.isArray(data.contentItems)) {
+    throw new CollectorDiagnosticError(`${label} : réponse JSON inattendue`, "invalid_response");
+  }
+  const entries = (data.contentItems as BlizzardEntry[]).filter((entry) => typeof entry?.contentId === "string");
+  if (data.contentItems.length > 0 && entries.length === 0) {
+    throw new CollectorDiagnosticError(`${label} : contenu JSON invalide`, "invalid_response");
+  }
+  return entries.slice(0, 6).map((entry) => {
     const p = entry.properties || {};
     const title = clean(p.title);
     const high = /patch|hotfix|season|saison|extension|update|mise à jour|battlegrounds/i.test(`${title} ${p.category || ""}`);
     return {
       id: `blizzard-${entry.contentId}`, theme, kind: "live" as const,
-      date: p.lastUpdated || p.publishDate || new Date().toISOString(), title,
+      date: [p.lastUpdated, p.publishDate].find((date) => date && !Number.isNaN(Date.parse(date))) || new Date().toISOString(), title,
       summary: clean(p.summary).slice(0, 260), source: "Blizzard — officiel", url: p.newsUrl || "",
       priority: high ? "Haute" as const : "Moyenne" as const,
       tags: [p.category || "Actualité officielle", product === "diablo-4" ? "Diablo IV" : "Hearthstone"].filter(Boolean),
@@ -103,23 +45,34 @@ async function franceTravail(): Promise<WatchItem[]> {
   const clientSecret = process.env.FRANCE_TRAVAIL_CLIENT_SECRET;
   if (!clientId || !clientSecret) throw new Error("Identifiants OAuth France Travail requis");
   const body = new URLSearchParams({ grant_type: "client_credentials", client_id: clientId, client_secret: clientSecret, scope: "api_offresdemploiv2 o2dsoffre" });
-  const tokenResponse = await fetchWithTimeout(
+  const tokenPayload = await requestJson<{ access_token?: unknown }>(
     "https://entreprise.francetravail.fr/connexion/oauth2/access_token?realm=/partenaire",
-    { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body },
+    { label: "OAuth France Travail", method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body },
   );
-  const token = (await tokenResponse.json()).access_token;
-  if (!token) throw new Error("Jeton OAuth France Travail absent");
+  const token = tokenPayload?.access_token;
+  if (typeof token !== "string" || !token.trim()) {
+    throw new CollectorDiagnosticError("OAuth France Travail : jeton absent ou invalide", "invalid_response");
+  }
   const searches = [
     new URLSearchParams({ departement: "47", range: "0-149", sort: "1" }),
     new URLSearchParams({ commune: "33227", distance: "45", range: "0-149", sort: "1" }),
   ];
   const payloads = await Promise.all(searches.map(async (params) => {
-    const response = await fetchWithTimeout(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, {
+    const payload = await requestJson<{ resultats?: unknown }>(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, {
+      label: "API France Travail",
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      allowEmpty: true,
     });
-    return response.json();
+    if (payload === null) return { resultats: [] as FranceOffer[] };
+    if (!Array.isArray(payload.resultats)) {
+      throw new CollectorDiagnosticError("API France Travail : réponse JSON inattendue", "invalid_response");
+    }
+    const invalidOffer = payload.resultats.some((offer) => !offer || typeof offer !== "object"
+      || typeof (offer as FranceOffer).id !== "string" || typeof (offer as FranceOffer).intitule !== "string");
+    if (invalidOffer) throw new CollectorDiagnosticError("API France Travail : offre invalide dans la réponse", "invalid_response");
+    return { resultats: payload.resultats as FranceOffer[] };
   }));
-  const uniqueOffers = [...new Map((payloads as { resultats?: FranceOffer[] }[]).flatMap((data) => data.resultats || []).map((offer) => [offer.id, offer])).values()];
+  const uniqueOffers = [...new Map(payloads.flatMap((data) => data.resultats).map((offer) => [offer.id, offer])).values()];
   const relevant = uniqueOffers.filter((offer) => /insertion|conseiller.*emploi|accompagnement.*professionnel|référent.*insertion|chargé.*insertion|mission locale|formateur.*insertion|éducateur.*spécialisé|orientation professionnelle/i.test(offer.intitule)).slice(0, 20);
   const checkedAt = new Date().toISOString();
   return relevant.map((offer) => ({
@@ -158,13 +111,13 @@ function createTasks(): CollectorTask[] {
   return [
     { source: get("blizzard-diablo-4"), run: () => blizzard("diablo-4", "Diablo 4") },
     { source: get("blizzard-hearthstone"), run: () => blizzard("hearthstone", "Hearthstone") },
-    { source: get("rss-ministere-travail"), run: async () => parseRss(await fetchText("https://travail-emploi.gouv.fr/rss.xml"), "Ministère du Travail", "CIP & réglementation", ["Emploi", "Officiel"], 6) },
-    { source: get("rss-unml"), run: async () => parseRss(await fetchText("https://www.unml.info/feed/"), "UNML", "CIP & réglementation", ["Mission Locale", "Réseau"], 5) },
-    { source: get("rss-google"), run: async () => parseRss(await fetchText("https://blog.google/rss/"), "Google — blog officiel", "Tech & gadgets", ["Google", "Produit"], 4) },
-    { source: get("rss-microsoft"), run: async () => parseRss(await fetchText("https://blogs.microsoft.com/feed/"), "Microsoft — blog officiel", "Tech & gadgets", ["Microsoft", "Produit"], 4) },
+    { source: get("rss-ministere-travail"), run: async () => parseRssFeed((await requestText("https://travail-emploi.gouv.fr/rss.xml", { label: "RSS Ministère du Travail", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Ministère du Travail", "CIP & réglementation", ["Emploi", "Officiel"], 6) },
+    { source: get("rss-unml"), run: async () => parseRssFeed((await requestText("https://www.unml.info/feed/", { label: "RSS UNML", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "UNML", "CIP & réglementation", ["Mission Locale", "Réseau"], 5) },
+    { source: get("rss-google"), run: async () => parseRssFeed((await requestText("https://blog.google/rss/", { label: "RSS Google", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Google — blog officiel", "Tech & gadgets", ["Google", "Produit"], 4) },
+    { source: get("rss-microsoft"), run: async () => parseRssFeed((await requestText("https://blogs.microsoft.com/feed/", { label: "RSS Microsoft", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Microsoft — blog officiel", "Tech & gadgets", ["Microsoft", "Produit"], 4) },
     ...youtubeChannels.map((channel) => ({
       source: get(channel.id),
-      run: async () => parseYoutube(await fetchText(`https://www.youtube.com/feeds/videos.xml?channel_id=${channel.channelId}`), channel.creator, channel.theme, 2),
+      run: async () => parseYoutubeFeed((await requestText(`https://www.youtube.com/feeds/videos.xml?channel_id=${channel.channelId}`, { label: `YouTube ${channel.creator}`, headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, channel.creator, channel.theme, 2),
     })),
     { source: get("france-travail"), run: franceTravail },
   ];
@@ -174,32 +127,7 @@ export async function runCollection() {
   await registerSources(sourceDefinitions);
   const tasks = createTasks();
   const runId = await startCollectionRun(tasks.length);
-  const results = await Promise.all(tasks.map(async (task) => {
-    const startedAt = new Date();
-    let ok = false;
-    let items: WatchItem[] = [];
-    let sourceError: string | undefined;
-    try {
-      items = await withSourceTimeout(task.run());
-      ok = true;
-    } catch (error) {
-      sourceError = error instanceof Error ? error.message : "Erreur de collecte inconnue";
-    }
-    const finishedAt = new Date();
-    try {
-      await recordSourceRun({
-        collectionRunId: runId, sourceId: task.source.id,
-        startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(),
-        status: ok ? "completed" : "failed", itemsCollected: ok ? items.length : 0,
-        durationMs: finishedAt.getTime() - startedAt.getTime(),
-        errorMessage: ok ? undefined : sourceError?.slice(0, 500),
-      });
-      return { ok, journaled: true, items, sourceId: task.source.id };
-    } catch (journalError) {
-      console.error(`Journalisation impossible pour la source ${task.source.id}`, journalError);
-      return { ok, journaled: false, items, sourceId: task.source.id };
-    }
-  }));
+  const results = await executeCollectorTasks(tasks, runId, recordSourceRun);
   const items = results.flatMap((result) => result.items).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   const { succeeded, failed } = summarizeSourceResults(results);
   const status = deriveCollectionStatus(succeeded, failed);
