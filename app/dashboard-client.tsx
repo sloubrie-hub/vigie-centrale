@@ -5,6 +5,8 @@ import { useEffect, useMemo, useState } from "react";
 type Theme = "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets";
 type DataKind = "live";
 type CollectionStatus = "running" | "completed" | "partial" | "failed";
+type HealthStatus = "healthy" | "degraded" | "error" | "inactive";
+type ReliabilityStatus = "reliable" | "degraded" | "unusable" | "pending" | "unknown";
 
 type Item = {
   id: number | string;
@@ -27,24 +29,47 @@ const themes: { name: Theme; icon: string; color: string }[] = [
   { name: "Tech & gadgets", icon: "⌁", color: "cyan" },
 ];
 
-const sourceRows = [
-  ["Blizzard News", "Diablo 4 / Hearthstone", "Live public", "RSS ou lecture officielle", "Prête à brancher"],
-  ["YouTube — 7 créateurs", "Diablo 4 / Hearthstone", "Live public", "Flux officiels des chaînes", "Connecté"],
-  ["France Travail", "Offres d’emploi", "Live officiel", "OAuth + API Offres v2", "Connecté"],
-  ["Légifrance", "Réglementation", "Live public / API", "Flux officiels + PISTE", "À cadrer"],
-  ["Missions Locales / collectivités", "CIP & emploi", "Live public", "Pages carrières et actualités", "À référencer"],
-  ["Maxroll / créateurs experts", "Diablo 4", "Public, non officiel", "Sélection éditoriale", "À qualifier"],
-  ["Sites tech reconnus", "Tech & gadgets", "Public, non officiel", "RSS + liste blanche", "À qualifier"],
-];
-
 const labels: Record<DataKind, string> = { live: "Donnée live" };
+
+type SourceState = {
+  id: string;
+  source: string;
+  theme: Theme | null;
+  connectorType: string;
+  active: boolean;
+  status: HealthStatus;
+  count: number;
+  detail: string;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastStatus: "completed" | "failed" | null;
+  consecutiveFailures: number;
+  successRate: number | null;
+  durationMs: number | null;
+  recentError: string | null;
+};
+
+type Reliability = { status: ReliabilityStatus; analysisReady: boolean; reasons: string[] };
 
 type InitialSnapshot = {
   items: Item[];
-  sources: {id?:string;source:string;status:"live"|"api"|"error"|"running";count:number;detail:string;checkedAt?:string|null;durationMs?:number|null}[];
+  sources: SourceState[];
   collection: {status:CollectionStatus;startedAt:string;finishedAt:string|null;sourceSucceeded:number;sourceFailed:number;errorMessage?:string|null}|null;
+  reliability: { global: Reliability; employment: Reliability } | null;
   checkedAt: string | null;
 };
+
+const healthLabels: Record<HealthStatus, string> = {
+  healthy: "SAINE", degraded: "DÉGRADÉE", error: "EN ERREUR", inactive: "INACTIVE",
+};
+
+const formatDate = (value: string | null) => value
+  ? new Date(value).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+  : "Jamais";
+
+const formatDuration = (value: number | null) => value === null
+  ? "—"
+  : value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${value} ms`;
 
 export default function DashboardClient({ initialSnapshot }: { initialSnapshot: InitialSnapshot }) {
   const [activeTheme, setActiveTheme] = useState<Theme | "Tous">("Tous");
@@ -56,7 +81,9 @@ export default function DashboardClient({ initialSnapshot }: { initialSnapshot: 
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [sourceStates, setSourceStates] = useState(initialSnapshot.sources);
   const [collection, setCollection] = useState(initialSnapshot.collection);
+  const [reliability, setReliability] = useState(initialSnapshot.reliability);
   const [loading, setLoading] = useState(false);
+  const [readError, setReadError] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<string | null>(initialSnapshot.checkedAt);
   const items = liveItems;
 
@@ -66,8 +93,8 @@ export default function DashboardClient({ initialSnapshot }: { initialSnapshot: 
       const response = await fetch("/api/veille", { cache: "no-store" });
       if (!response.ok) throw new Error("Collecte indisponible");
       const data = await response.json();
-      setLiveItems(data.items || []); setSourceStates(data.sources || []); setCollection(data.collection || null); setLastRefresh(data.checkedAt || null);
-    } catch { setSourceStates([{ source: "Collecteur Vigie", status: "error", count: 0, detail: "La collecte n’a pas répondu" }]); }
+      setLiveItems(data.items || []); setSourceStates(data.sources || []); setCollection(data.collection || null); setReliability(data.reliability || null); setLastRefresh(data.checkedAt || null); setReadError(false);
+    } catch { setReadError(true); }
     finally { if (showLoading) setLoading(false); }
   };
 
@@ -78,11 +105,15 @@ export default function DashboardClient({ initialSnapshot }: { initialSnapshot: 
   }, [collection?.status]);
 
   const collecting = collection?.status === "running";
+  const healthCounts = sourceStates.reduce((counts, source) => ({ ...counts, [source.status]: counts[source.status] + 1 }), { healthy: 0, degraded: 0, error: 0, inactive: 0 });
   const statusLabel = loading ? "Chargement des données"
     : collecting ? "Acquisition en cours"
+    : !collection ? "Aucune collecte connue"
     : collection?.status === "partial" ? "Partiellement à jour"
     : collection?.status === "failed" ? "Dernière collecte en erreur"
-    : `${sourceStates.filter(s => s.status === "live").length} sources à jour`;
+    : healthCounts.error > 0 ? `${healthCounts.healthy} sources à jour · ${healthCounts.error} en erreur`
+    : healthCounts.degraded > 0 ? `${healthCounts.healthy} sources à jour · ${healthCounts.degraded} dégradée${healthCounts.degraded > 1 ? "s" : ""}`
+    : `${healthCounts.healthy} sources à jour`;
 
   const visible = useMemo(() => items.filter((item) => {
     const themeOk = activeTheme === "Tous" || item.theme === activeTheme;
@@ -138,8 +169,8 @@ export default function DashboardClient({ initialSnapshot }: { initialSnapshot: 
             <div className="hero-metric"><span>À traiter</span><strong>{visible.filter(i => i.priority === "Haute").length}</strong><small>alertes prioritaires</small></div>
           </section>
 
-          <section className={`integrity-banner ${collection?.status || "unknown"}`}>
-            <div className="shield">{collection?.status === "partial" || collection?.status === "failed" ? "!" : collecting ? "↻" : "✓"}</div><div><strong>{collecting ? "Acquisition en cours — affichage des dernières données disponibles" : collection?.status === "partial" ? "Collecte partielle — certaines sources sont indisponibles" : collection?.status === "failed" ? "Dernière collecte en erreur — données précédentes conservées" : "Dernières données disponibles"}</strong><p>{collecting ? "La navigation reste disponible pendant que les sources sont interrogées en arrière-plan." : collection?.status === "partial" ? `${collection.sourceSucceeded} sources réussies, ${collection.sourceFailed} en erreur. ${collection.errorMessage || "Les données précédentes restent consultables."}` : collection?.status === "failed" && collection.errorMessage ? collection.errorMessage : "Le flux affiche les éléments déjà stockés dans Neon. L’ouverture de cette page ne déclenche aucune source externe."}</p></div>
+          <section className={`integrity-banner ${collection?.status || "unknown"} ${reliability?.global.status === "degraded" || reliability?.global.status === "unusable" ? "health-warning" : ""}`}>
+            <div className="shield">{collection?.status === "partial" || collection?.status === "failed" || reliability?.global.status === "degraded" || reliability?.global.status === "unusable" ? "!" : collecting ? "↻" : "✓"}</div><div><strong>{readError ? "Rafraîchissement indisponible — dernières données conservées" : collecting ? "Acquisition en cours — affichage des dernières données disponibles" : collection?.status === "partial" ? "Collecte partielle — certaines sources sont indisponibles" : collection?.status === "failed" ? "Dernière collecte en erreur — données précédentes conservées" : reliability?.global.status === "degraded" || reliability?.global.status === "unusable" ? "Données disponibles — santé des sources à vérifier" : collection ? "Dernière collecte complète" : "Aucune collecte connue"}</strong><p>{readError ? "L’échec de lecture ne supprime pas les éléments déjà affichés." : collecting ? "La navigation reste disponible pendant que les sources sont interrogées en arrière-plan." : collection?.status === "partial" ? `${collection.sourceSucceeded} sources réussies, ${collection.sourceFailed} en erreur. ${collection.errorMessage || "Les données précédentes restent consultables."}` : collection?.status === "failed" && collection.errorMessage ? collection.errorMessage : reliability?.global.reasons.length ? reliability.global.reasons.join(" · ") : "Le flux affiche les éléments déjà stockés dans Neon. L’ouverture de cette page ne déclenche aucune source externe."}</p></div>
           </section>
 
           <div className="filters" aria-label="Filtrer par type de donnée">
@@ -170,13 +201,15 @@ export default function DashboardClient({ initialSnapshot }: { initialSnapshot: 
             </article>)}
           </section>
         </div> : <div className="content sources-view">
-          <section className="hero compact"><div><p className="eyebrow">TRAÇABILITÉ</p><h1>Sources & connexions</h1><p>Le registre qui empêche de confondre collecte réelle et contenu de test.</p></div></section>
-          <div className="source-summary"><div><strong>{sourceStates.filter(s => s.status === "live").length}</strong><span>sources live connectées</span></div><div><strong>{sourceStates.filter(s => s.status === "api").length}</strong><span>API à préparer</span></div><div><strong>{sourceStates.reduce((n,s) => n+s.count,0)}</strong><span>éléments collectés</span></div></div>
-          <section className="connection-grid">{sourceStates.map(state => <article key={state.id || state.source} className={`connection ${state.status}`}><span>{state.status === "live" ? "À JOUR" : state.status === "running" ? "EN COURS" : state.status === "api" ? "INACTIVE" : "ERREUR"}</span><strong>{state.source}</strong><p>{state.detail}</p><b>{state.count} élément{state.count > 1 ? "s" : ""}{state.durationMs !== null && state.durationMs !== undefined ? ` · ${state.durationMs} ms` : ""}</b></article>)}</section>
-          <section className="source-panel"><div className="panel-heading"><div><h2>Plan de branchement</h2><p>Ordre recommandé : sources officielles publiques, API emploi, puis sources éditoriales qualifiées.</p></div><span>Phase 1</span></div>
-            <div className="source-table"><div className="table-row head"><span>Source</span><span>Thème</span><span>Statut des données</span><span>Accès</span><span>État</span></div>{sourceRows.map((row) => <div className="table-row" key={row[0]}>{row.map((cell, i) => <span key={i} data-label={["Source","Thème","Statut","Accès","État"][i]}>{cell}</span>)}</div>)}</div>
-          </section>
-          <section className="rules"><h2>Règles de confiance</h2><div className="rule-grid"><article><b>01</b><strong>Source avant résumé</strong><p>Chaque information conserve son lien, son éditeur et sa date de collecte.</p></article><article><b>02</b><strong>Officiel avant commentaire</strong><p>Les annonces officielles sont distinguées des analyses, guides et opinions.</p></article><article><b>03</b><strong>Démo toujours visible</strong><p>Une donnée de test garde son badge, même lorsqu’elle ressemble à une vraie actualité.</p></article></div></section>
+          <section className="hero compact"><div><p className="eyebrow">OBSERVABILITÉ</p><h1>Sources & connexions</h1><p>Santé calculée sur les 10 dernières tentatives de chaque source.</p></div></section>
+          <div className="source-summary"><div><strong>{healthCounts.healthy}</strong><span>sources saines</span></div><div><strong>{healthCounts.degraded}</strong><span>dégradées</span></div><div><strong>{healthCounts.error}</strong><span>en erreur</span></div><div><strong>{healthCounts.inactive}</strong><span>inactives</span></div></div>
+          {sourceStates.length === 0 ? <div className="empty"><strong>Aucune source connue</strong><p>Le registre apparaîtra ici après sa migration et sa première initialisation.</p></div> : <section className="connection-grid">{sourceStates.map(state => <article key={state.id} className={`connection ${state.status}`}>
+            <div className="connection-title"><span>{healthLabels[state.status]}</span><small>{state.connectorType.replace("_", " ")} · {state.theme || "Sans domaine"}</small></div>
+            <strong>{state.source}</strong><p>{state.detail}</p>
+            <dl><div><dt>Dernière tentative</dt><dd>{formatDate(state.lastAttemptAt)}</dd></div><div><dt>Dernier succès</dt><dd>{formatDate(state.lastSuccessAt)}</dd></div><div><dt>Éléments</dt><dd>{state.count}</dd></div><div><dt>Durée</dt><dd>{formatDuration(state.durationMs)}</dd></div><div><dt>Succès récents</dt><dd>{state.successRate === null ? "—" : `${state.successRate} %`}</dd></div><div><dt>Échecs consécutifs</dt><dd>{state.consecutiveFailures}</dd></div></dl>
+            {state.recentError && <div className="source-error" title={state.recentError}>{state.recentError}</div>}
+          </article>)}</section>}
+          <section className="rules"><h2>Règles de santé</h2><div className="rule-grid health-rules"><article><b>01</b><strong>Saine</strong><p>Dernière tentative réussie et au moins 80 % de succès sur les 10 derniers runs.</p></article><article><b>02</b><strong>Dégradée</strong><p>Premier run absent, échec isolé après un succès, ou taux récent inférieur à 80 %.</p></article><article><b>03</b><strong>En erreur</strong><p>Deux échecs consécutifs, ou aucun succès connu après une tentative en échec.</p></article><article><b>04</b><strong>Inactive</strong><p>Désactivation volontaire : elle ne compte ni comme panne ni comme collecte manquante.</p></article></div></section>
         </div>}
       </section>
     </main>

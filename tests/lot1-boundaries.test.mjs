@@ -11,6 +11,15 @@ test("la route publique de veille est strictement en lecture", async () => {
   assert.doesNotMatch(route, /runCollection|archiveItems|fetch\(/);
 });
 
+test("la santé des sources reste calculée depuis l'historique, sans table de synthèse", async () => {
+  const store = await read("lib/collection-store.ts");
+  const migration = await read("migrations/001_lot1_collection_runs.sql");
+  assert.match(store, /source_runs/);
+  assert.match(store, /HEALTH_WINDOW_SIZE/);
+  assert.doesNotMatch(store, /source_health/);
+  assert.doesNotMatch(migration, /source_health/);
+});
+
 test("la route archives ne crée plus le schéma", async () => {
   const archive = await read("lib/archive.ts");
   assert.doesNotMatch(archive, /CREATE TABLE|INSERT INTO|UPDATE |DELETE FROM/);
