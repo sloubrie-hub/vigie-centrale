@@ -37,11 +37,15 @@ CREATE TABLE IF NOT EXISTS collection_runs (
   source_succeeded INTEGER NOT NULL DEFAULT 0,
   source_failed INTEGER NOT NULL DEFAULT 0,
   items_collected INTEGER NOT NULL DEFAULT 0,
-  items_stored INTEGER NOT NULL DEFAULT 0
+  items_stored INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT
 );
 
 CREATE INDEX IF NOT EXISTS collection_runs_started_idx
   ON collection_runs (started_at DESC);
+
+ALTER TABLE collection_runs
+  ADD COLUMN IF NOT EXISTS error_message TEXT;
 
 CREATE TABLE IF NOT EXISTS source_runs (
   id UUID PRIMARY KEY,

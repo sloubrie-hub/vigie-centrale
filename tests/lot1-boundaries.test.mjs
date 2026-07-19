@@ -16,6 +16,13 @@ test("la route archives ne crée plus le schéma", async () => {
   assert.doesNotMatch(archive, /CREATE TABLE|INSERT INTO|UPDATE |DELETE FROM/);
 });
 
+test("la migration est l’unique source de vérité du schéma", async () => {
+  const collector = await read("lib/collector.ts");
+  const store = await read("lib/collection-store.ts");
+  assert.doesNotMatch(collector, /ensureCollectionSchema/);
+  assert.doesNotMatch(store, /CREATE TABLE|CREATE INDEX/);
+});
+
 test("tous les accès HTTP externes passent par un timeout explicite", async () => {
   const collector = await read("lib/collector.ts");
   const directFetches = [...collector.matchAll(/\bfetch\(/g)];
@@ -28,4 +35,11 @@ test("un run concurrent récent est refusé et un run bloqué devient caduc", as
   const store = await read("lib/collection-store.ts");
   assert.match(store, /Une collecte est déjà en cours/);
   assert.match(store, /10 \* 60 \* 1000/);
+});
+
+test("une erreur de journalisation de source ne rejette pas Promise.all", async () => {
+  const collector = await read("lib/collector.ts");
+  assert.match(collector, /journaled: false/);
+  assert.match(collector, /Journalisation incomplète/);
+  assert.match(collector, /Finalisation du run impossible/);
 });

@@ -38,6 +38,8 @@ Avant le premier déploiement du Lot 1, exécuter la migration additive :
 migrations/001_lot1_collection_runs.sql
 ```
 
+Cette migration est l’unique source de vérité du schéma. Les collectes n’exécutent aucun DDL au runtime.
+
 ## Déploiement
 
 Le projet est conçu pour être importé directement dans Vercel comme application Next.js.

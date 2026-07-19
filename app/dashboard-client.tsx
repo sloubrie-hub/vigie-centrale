@@ -42,7 +42,7 @@ const labels: Record<DataKind, string> = { live: "Donnée live" };
 type InitialSnapshot = {
   items: Item[];
   sources: {id?:string;source:string;status:"live"|"api"|"error"|"running";count:number;detail:string;checkedAt?:string|null;durationMs?:number|null}[];
-  collection: {status:CollectionStatus;startedAt:string;finishedAt:string|null;sourceSucceeded:number;sourceFailed:number}|null;
+  collection: {status:CollectionStatus;startedAt:string;finishedAt:string|null;sourceSucceeded:number;sourceFailed:number;errorMessage?:string|null}|null;
   checkedAt: string | null;
 };
 
@@ -139,7 +139,7 @@ export default function DashboardClient({ initialSnapshot }: { initialSnapshot: 
           </section>
 
           <section className={`integrity-banner ${collection?.status || "unknown"}`}>
-            <div className="shield">{collection?.status === "partial" || collection?.status === "failed" ? "!" : collecting ? "↻" : "✓"}</div><div><strong>{collecting ? "Acquisition en cours — affichage des dernières données disponibles" : collection?.status === "partial" ? "Collecte partielle — certaines sources sont indisponibles" : collection?.status === "failed" ? "Dernière collecte en erreur — données précédentes conservées" : "Dernières données disponibles"}</strong><p>{collecting ? "La navigation reste disponible pendant que les sources sont interrogées en arrière-plan." : collection?.status === "partial" ? `${collection.sourceSucceeded} sources réussies, ${collection.sourceFailed} en erreur. Les données précédentes restent consultables.` : "Le flux affiche les éléments déjà stockés dans Neon. L’ouverture de cette page ne déclenche aucune source externe."}</p></div>
+            <div className="shield">{collection?.status === "partial" || collection?.status === "failed" ? "!" : collecting ? "↻" : "✓"}</div><div><strong>{collecting ? "Acquisition en cours — affichage des dernières données disponibles" : collection?.status === "partial" ? "Collecte partielle — certaines sources sont indisponibles" : collection?.status === "failed" ? "Dernière collecte en erreur — données précédentes conservées" : "Dernières données disponibles"}</strong><p>{collecting ? "La navigation reste disponible pendant que les sources sont interrogées en arrière-plan." : collection?.status === "partial" ? `${collection.sourceSucceeded} sources réussies, ${collection.sourceFailed} en erreur. ${collection.errorMessage || "Les données précédentes restent consultables."}` : collection?.status === "failed" && collection.errorMessage ? collection.errorMessage : "Le flux affiche les éléments déjà stockés dans Neon. L’ouverture de cette page ne déclenche aucune source externe."}</p></div>
           </section>
 
           <div className="filters" aria-label="Filtrer par type de donnée">

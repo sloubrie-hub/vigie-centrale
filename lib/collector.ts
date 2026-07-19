@@ -1,5 +1,5 @@
-import { archiveItems, ensureCollectionSchema, finishCollectionRun, recordSourceRun, registerSources, startCollectionRun } from "@/lib/collection-store";
-import { deriveCollectionStatus } from "@/lib/collection-status";
+import { archiveItems, finishCollectionRun, recordSourceRun, registerSources, startCollectionRun } from "@/lib/collection-store";
+import { deriveCollectionStatus, summarizeSourceResults } from "@/lib/collection-status";
 import type { SourceDefinition, WatchItem, WatchTheme } from "@/lib/watch-types";
 
 type BlizzardEntry = { contentId: string; properties?: { title?: string; category?: string; summary?: string; lastUpdated?: string; publishDate?: string; newsUrl?: string } };
@@ -171,35 +171,56 @@ function createTasks(): CollectorTask[] {
 }
 
 export async function runCollection() {
-  await ensureCollectionSchema();
   await registerSources(sourceDefinitions);
   const tasks = createTasks();
   const runId = await startCollectionRun(tasks.length);
   const results = await Promise.all(tasks.map(async (task) => {
     const startedAt = new Date();
+    let ok = false;
+    let items: WatchItem[] = [];
+    let sourceError: string | undefined;
     try {
-      const items = await withSourceTimeout(task.run());
-      const finishedAt = new Date();
-      await recordSourceRun({ collectionRunId: runId, sourceId: task.source.id, startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(), status: "completed", itemsCollected: items.length, durationMs: finishedAt.getTime() - startedAt.getTime() });
-      return { ok: true as const, items };
+      items = await withSourceTimeout(task.run());
+      ok = true;
     } catch (error) {
-      const finishedAt = new Date();
-      const message = error instanceof Error ? error.message : "Erreur de collecte inconnue";
-      await recordSourceRun({ collectionRunId: runId, sourceId: task.source.id, startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(), status: "failed", itemsCollected: 0, durationMs: finishedAt.getTime() - startedAt.getTime(), errorMessage: message.slice(0, 500) });
-      return { ok: false as const, items: [] as WatchItem[] };
+      sourceError = error instanceof Error ? error.message : "Erreur de collecte inconnue";
+    }
+    const finishedAt = new Date();
+    try {
+      await recordSourceRun({
+        collectionRunId: runId, sourceId: task.source.id,
+        startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(),
+        status: ok ? "completed" : "failed", itemsCollected: ok ? items.length : 0,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        errorMessage: ok ? undefined : sourceError?.slice(0, 500),
+      });
+      return { ok, journaled: true, items, sourceId: task.source.id };
+    } catch (journalError) {
+      console.error(`Journalisation impossible pour la source ${task.source.id}`, journalError);
+      return { ok, journaled: false, items, sourceId: task.source.id };
     }
   }));
   const items = results.flatMap((result) => result.items).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-  const succeeded = results.filter((result) => result.ok).length;
-  const failed = results.length - succeeded;
+  const { succeeded, failed } = summarizeSourceResults(results);
   const status = deriveCollectionStatus(succeeded, failed);
+  const unjournaledSources = results.filter((result) => !result.journaled).map((result) => result.sourceId);
+  const journalError = unjournaledSources.length > 0
+    ? `Journalisation incomplète pour : ${unjournaledSources.join(", ")}`
+    : undefined;
   let stored = 0;
   try {
     stored = await archiveItems(items);
+    await finishCollectionRun({ id: runId, status, succeeded, failed, itemsCollected: items.length, itemsStored: stored, errorMessage: journalError });
+    return { id: runId, status, collected: items.length, stored, sourceTotal: results.length, sourceSucceeded: succeeded, sourceFailed: failed, warning: journalError };
   } catch (error) {
-    await finishCollectionRun({ id: runId, status: "failed", succeeded, failed: failed + 1, itemsCollected: items.length, itemsStored: 0 });
+    const primaryError = error instanceof Error ? error.message : "Erreur de persistance inconnue";
+    try {
+      await finishCollectionRun({ id: runId, status: "failed", succeeded, failed: Math.max(failed, 1), itemsCollected: items.length, itemsStored: stored, errorMessage: primaryError.slice(0, 500) });
+    } catch (finalizationError) {
+      const finalMessage = finalizationError instanceof Error ? finalizationError.message : "Erreur inconnue";
+      console.error(`Finalisation impossible pour le run ${runId}`, finalizationError);
+      throw new Error(`${primaryError}. Finalisation du run impossible : ${finalMessage}`);
+    }
     throw error;
   }
-  await finishCollectionRun({ id: runId, status, succeeded, failed, itemsCollected: items.length, itemsStored: stored });
-  return { id: runId, status, collected: items.length, stored, sourceTotal: results.length, sourceSucceeded: succeeded, sourceFailed: failed };
 }
