@@ -23,16 +23,37 @@ export type SourceDefinition = {
 };
 
 export type CollectionStatus = "running" | "completed" | "partial" | "failed";
-export type SourceRunStatus = "running" | "completed" | "failed";
+export type SourceRunStatus = "completed" | "failed";
+export type SourceHealthStatus = "healthy" | "degraded" | "error" | "inactive";
 
 export type SourceHealth = {
   id: string;
   source: string;
-  status: "live" | "api" | "error" | "running";
+  theme: WatchTheme | null;
+  connectorType: SourceDefinition["connectorType"];
+  active: boolean;
+  status: SourceHealthStatus;
   count: number;
   detail: string;
-  checkedAt: string | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastStatus: SourceRunStatus | null;
+  consecutiveFailures: number;
+  successRate: number | null;
   durationMs: number | null;
+  recentError: string | null;
+  lastCollectionRunId: string | null;
+};
+
+export type DataReliability = {
+  status: "reliable" | "degraded" | "unusable" | "pending" | "unknown";
+  analysisReady: boolean;
+  reasons: string[];
+};
+
+export type ReliabilitySummary = {
+  global: DataReliability;
+  employment: DataReliability;
 };
 
 export type CollectionSummary = {

@@ -11,10 +11,11 @@ export default async function Home() {
       items,
       sources: state.sources,
       collection: state.collection,
+      reliability: state.reliability,
       checkedAt: state.collection?.finishedAt || state.collection?.startedAt || null,
     };
   } catch {
-    initialSnapshot = { items: [], sources: [], collection: null, checkedAt: null };
+    initialSnapshot = { items: [], sources: [], collection: null, reliability: null, checkedAt: null };
   }
   return <DashboardClient initialSnapshot={initialSnapshot} />;
 }

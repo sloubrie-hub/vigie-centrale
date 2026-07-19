@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
-import type { CollectionStatus, CollectionSummary, SourceDefinition, SourceHealth, SourceRunStatus, WatchItem } from "@/lib/watch-types";
+import { assessDataReliability, calculateSourceHealth, HEALTH_WINDOW_SIZE, type SourceRunObservation } from "@/lib/source-health";
+import type { CollectionStatus, CollectionSummary, ReliabilitySummary, SourceDefinition, SourceHealth, SourceRunStatus, WatchItem } from "@/lib/watch-types";
 
 const database = () => process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
 
@@ -89,47 +90,91 @@ export async function readLatestItems(limit = 300): Promise<WatchItem[]> {
   }));
 }
 
-export async function readCollectionState(): Promise<{ collection: CollectionSummary; sources: SourceHealth[] }> {
+export async function readCollectionState(): Promise<{ collection: CollectionSummary; sources: SourceHealth[]; reliability: ReliabilitySummary }> {
   const sql = database();
-  if (!sql) return { collection: null, sources: [] };
+  const emptyReliability: ReliabilitySummary = {
+    global: assessDataReliability(null, []),
+    employment: assessDataReliability(null, [], ["france-travail"]),
+  };
+  if (!sql) return { collection: null, sources: [], reliability: emptyReliability };
   let runRows;
+  let sourceRows;
   try {
     runRows = await sql`SELECT id, status, started_at, finished_at, source_total,
       source_succeeded, source_failed, items_collected, items_stored, error_message
       FROM collection_runs ORDER BY started_at DESC LIMIT 1`;
+    sourceRows = await sql`
+      SELECT s.id, s.name, s.theme, s.connector_type, s.active,
+        rr.collection_run_id, rr.status, rr.started_at, rr.finished_at, rr.items_collected,
+        rr.duration_ms, rr.error_message, ls.last_success_at, le.last_error_message
+      FROM sources s
+      LEFT JOIN LATERAL (
+        SELECT collection_run_id, status, started_at, finished_at, items_collected, duration_ms, error_message
+        FROM source_runs WHERE source_id = s.id ORDER BY finished_at DESC LIMIT ${HEALTH_WINDOW_SIZE}
+      ) rr ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT finished_at AS last_success_at FROM source_runs
+        WHERE source_id = s.id AND status = 'completed' ORDER BY finished_at DESC LIMIT 1
+      ) ls ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT error_message AS last_error_message FROM source_runs
+        WHERE source_id = s.id AND error_message IS NOT NULL ORDER BY finished_at DESC LIMIT 1
+      ) le ON TRUE
+      ORDER BY s.name, rr.finished_at DESC`;
   } catch {
     // Compatibilité de déploiement : les archives V0 restent lisibles avant la migration additive.
-    return { collection: null, sources: [] };
+    return { collection: null, sources: [], reliability: emptyReliability };
   }
-  if (runRows.length === 0) return { collection: null, sources: [] };
-  const run = runRows[0];
-  const staleRunning = String(run.status) === "running"
-    && Date.now() - new Date(String(run.started_at)).getTime() > 10 * 60 * 1000;
-  const sourceRows = await sql`SELECT s.id, s.name, s.active, sr.status, sr.items_collected,
-    sr.finished_at, sr.duration_ms, sr.error_message
-    FROM sources s LEFT JOIN source_runs sr
-      ON sr.source_id = s.id AND sr.collection_run_id = ${String(run.id)}
-    ORDER BY s.name`;
-  const running = String(run.status) === "running" && !staleRunning;
-  return {
-    collection: {
+  const grouped = new Map<string, { definition: SourceDefinition; observations: SourceRunObservation[]; lastSuccessAt: string | null; lastKnownError: string | null }>();
+  for (const row of sourceRows) {
+    const id = String(row.id);
+    const entry = grouped.get(id) || {
+      definition: {
+        id,
+        name: String(row.name),
+        theme: row.theme ? String(row.theme) as SourceDefinition["theme"] : null,
+        connectorType: String(row.connector_type) as SourceDefinition["connectorType"],
+        active: Boolean(row.active),
+      },
+      observations: [],
+      lastSuccessAt: row.last_success_at ? new Date(String(row.last_success_at)).toISOString() : null,
+      lastKnownError: row.last_error_message ? String(row.last_error_message) : null,
+    };
+    if (row.status && row.finished_at) {
+      entry.observations.push({
+        collectionRunId: String(row.collection_run_id),
+        status: String(row.status) as SourceRunStatus,
+        startedAt: new Date(String(row.started_at)).toISOString(),
+        finishedAt: new Date(String(row.finished_at)).toISOString(),
+        itemsCollected: Number(row.items_collected || 0),
+        durationMs: Number(row.duration_ms || 0),
+        errorMessage: row.error_message ? String(row.error_message) : null,
+      });
+    }
+    grouped.set(id, entry);
+  }
+  const sources = [...grouped.values()].map((entry) => calculateSourceHealth(entry.definition, entry.observations, entry.lastSuccessAt, entry.lastKnownError));
+
+  let collection: CollectionSummary = null;
+  if (runRows.length > 0) {
+    const run = runRows[0];
+    const staleRunning = String(run.status) === "running"
+      && Date.now() - new Date(String(run.started_at)).getTime() > 10 * 60 * 1000;
+    collection = {
       id: String(run.id), status: (staleRunning ? "failed" : String(run.status)) as CollectionStatus,
       startedAt: new Date(String(run.started_at)).toISOString(),
       finishedAt: run.finished_at ? new Date(String(run.finished_at)).toISOString() : null,
       sourceTotal: Number(run.source_total), sourceSucceeded: Number(run.source_succeeded),
       sourceFailed: Number(run.source_failed), itemsCollected: Number(run.items_collected),
       itemsStored: Number(run.items_stored), errorMessage: run.error_message ? String(run.error_message) : null,
+    };
+  }
+  return {
+    collection,
+    sources,
+    reliability: {
+      global: assessDataReliability(collection, sources),
+      employment: assessDataReliability(collection, sources, ["france-travail"]),
     },
-    sources: sourceRows.map((row) => {
-      const active = Boolean(row.active);
-      const status = !active ? "api" : row.status === "failed" ? "error" : row.status === "completed" ? "live" : running ? "running" : "error";
-      return {
-        id: String(row.id), source: String(row.name), status,
-        count: Number(row.items_collected || 0),
-        detail: !active ? "Source non activée" : row.error_message ? String(row.error_message) : status === "running" ? "Acquisition en cours" : status === "live" ? "Dernière collecte réussie" : staleRunning ? "Collecte interrompue ou arrivée à expiration" : "Aucun résultat pour cette collecte",
-        checkedAt: row.finished_at ? new Date(String(row.finished_at)).toISOString() : null,
-        durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
-      } as SourceHealth;
-    }),
   };
 }
