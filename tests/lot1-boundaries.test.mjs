@@ -11,6 +11,14 @@ test("la route publique de veille est strictement en lecture", async () => {
   assert.doesNotMatch(route, /runCollection|archiveItems|fetch\(/);
 });
 
+test("la compatibilité des identifiants reste confinée à l'archivage", async () => {
+  const route = await read("app/api/veille/route.ts");
+  const store = await read("lib/collection-store.ts");
+  assert.doesNotMatch(route, /archiveItemsWithStore|watch_archive|INSERT|UPDATE|DELETE/);
+  assert.match(store, /source = \$\{row\.source\} AND/);
+  assert.match(store, /url = \$\{row\.url\}/);
+});
+
 test("la santé des sources reste calculée depuis l'historique, sans table de synthèse", async () => {
   const store = await read("lib/collection-store.ts");
   const migration = await read("migrations/001_lot1_collection_runs.sql");
