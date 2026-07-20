@@ -11,6 +11,16 @@ test("la route publique de veille est strictement en lecture", async () => {
   assert.doesNotMatch(route, /runCollection|archiveItems|fetch\(/);
 });
 
+test("la compatibilité des identifiants reste confinée à l'archivage", async () => {
+  const route = await read("app/api/veille/route.ts");
+  const store = await read("lib/collection-store.ts");
+  assert.doesNotMatch(route, /archiveItemsWithStore|watch_archive|INSERT|UPDATE|DELETE/);
+  assert.match(store, /source = \$\{row\.source\} AND/);
+  assert.match(store, /url = \$\{row\.url\}/);
+  assert.match(store, /CAST\(\$\{row\.youtube_video_id\} AS text\) IS NOT NULL/);
+  assert.doesNotMatch(store, /\$\{[^}]+\} IS (?:NOT )?NULL/);
+});
+
 test("la santé des sources reste calculée depuis l'historique, sans table de synthèse", async () => {
   const store = await read("lib/collection-store.ts");
   const migration = await read("migrations/001_lot1_collection_runs.sql");
@@ -34,10 +44,12 @@ test("la migration est l’unique source de vérité du schéma", async () => {
 
 test("tous les accès HTTP externes passent par un timeout explicite", async () => {
   const collector = await read("lib/collector.ts");
-  const directFetches = [...collector.matchAll(/\bfetch\(/g)];
-  assert.equal(directFetches.length, 1, "seul fetchWithTimeout doit appeler fetch directement");
-  assert.match(collector, /HTTP_TIMEOUT_MS/);
-  assert.match(collector, /SOURCE_TIMEOUT_MS/);
+  const http = await read("lib/http-client.ts");
+  const runner = await read("lib/collector-runner.ts");
+  assert.doesNotMatch(collector, /\bfetch\(/);
+  assert.match(http, /AbortController/);
+  assert.match(http, /DEFAULT_HTTP_TIMEOUT_MS/);
+  assert.match(runner, /SOURCE_TIMEOUT_MS/);
 });
 
 test("un run concurrent récent est refusé et un run bloqué devient caduc", async () => {
@@ -48,7 +60,10 @@ test("un run concurrent récent est refusé et un run bloqué devient caduc", as
 
 test("une erreur de journalisation de source ne rejette pas Promise.all", async () => {
   const collector = await read("lib/collector.ts");
-  assert.match(collector, /journaled: false/);
+  const runner = await read("lib/collector-runner.ts");
+  assert.match(runner, /journaled: false/);
+  assert.match(runner, /Promise\.allSettled/);
   assert.match(collector, /Journalisation incomplète/);
   assert.match(collector, /Finalisation du run impossible/);
+  assert.match(collector, /finishCollectionRun\(\{ id: runId, status: "failed"/);
 });

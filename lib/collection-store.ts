@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
+import { archiveItemsWithStore } from "@/lib/archive-identity";
 import { assessDataReliability, calculateSourceHealth, HEALTH_WINDOW_SIZE, type SourceRunObservation } from "@/lib/source-health";
 import type { CollectionStatus, CollectionSummary, ReliabilitySummary, SourceDefinition, SourceHealth, SourceRunStatus, WatchItem } from "@/lib/watch-types";
 
@@ -59,19 +60,35 @@ export async function finishCollectionRun(input: {
 
 export async function archiveItems(items: WatchItem[]) {
   const sql = requireDatabase();
-  if (items.length === 0) return 0;
-  const rows = items.map((item) => ({
-    source_id: String(item.id), theme: item.theme, published_at: item.date, title: item.title,
-    summary: item.summary, source: item.source, url: item.url, priority: item.priority,
-    tags: JSON.stringify(item.tags),
-  }));
-  await sql.transaction(rows.map((row) => sql`INSERT INTO watch_archive
-    (source_id, theme, published_at, title, summary, source, url, priority, tags)
-    VALUES (${row.source_id}, ${row.theme}, ${row.published_at}, ${row.title}, ${row.summary},
-      ${row.source}, ${row.url}, ${row.priority}, ${row.tags}::jsonb)
-    ON CONFLICT (source_id) DO UPDATE SET title = EXCLUDED.title, summary = EXCLUDED.summary,
-      url = EXCLUDED.url, priority = EXCLUDED.priority, tags = EXCLUDED.tags, last_seen_at = NOW()`));
-  return rows.length;
+  return archiveItemsWithStore(items, async (rows) => {
+    await sql.transaction(rows.map((row) => sql`WITH target AS (
+        SELECT source_id FROM watch_archive
+        WHERE source_id = ${row.source_id} OR (source = ${row.source} AND (
+          url = ${row.url} OR (CAST(${row.youtube_video_id} AS text) IS NOT NULL AND (
+            SUBSTRING(url FROM '[?&]v=([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
+            OR SUBSTRING(url FROM 'youtu\\.be/([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
+            OR SUBSTRING(url FROM '/shorts/([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
+            OR SUBSTRING(url FROM '/embed/([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
+          ))
+        ))
+        ORDER BY first_seen_at ASC, source_id ASC
+        LIMIT 1
+      ), updated AS (
+        UPDATE watch_archive SET title = ${row.title}, summary = ${row.summary},
+          url = ${row.url}, priority = ${row.priority}, tags = ${row.tags}::jsonb,
+          last_seen_at = NOW()
+        WHERE source_id = (SELECT source_id FROM target)
+        RETURNING source_id
+      )
+      INSERT INTO watch_archive
+        (source_id, theme, published_at, title, summary, source, url, priority, tags)
+      SELECT ${row.source_id}, ${row.theme}, ${row.published_at}, ${row.title}, ${row.summary},
+        ${row.source}, ${row.url}, ${row.priority}, ${row.tags}::jsonb
+      WHERE NOT EXISTS (SELECT 1 FROM updated)
+      ON CONFLICT (source_id) DO UPDATE SET title = EXCLUDED.title,
+        summary = EXCLUDED.summary, url = EXCLUDED.url, priority = EXCLUDED.priority,
+        tags = EXCLUDED.tags, last_seen_at = NOW()`));
+  });
 }
 
 export async function readLatestItems(limit = 300): Promise<WatchItem[]> {
