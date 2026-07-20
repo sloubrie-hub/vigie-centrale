@@ -13,10 +13,10 @@ test("deux upserts PostgreSQL concurrents conservent une seule offre atomique", 
   const previousDatabaseUrl = process.env.DATABASE_URL;
   process.env.DATABASE_URL = testDatabaseUrl;
   const sql = neon(testDatabaseUrl);
-  const externalId = `lot4a-concurrency-${randomUUID()}`;
-  const rollbackTitle = `lot4a-rollback-${randomUUID()}`;
+  const testMarker = `lot4a-concurrency-${randomUUID()}`;
+  const rollbackMarker = `lot4a-rollback-${randomUUID()}`;
+  const externalId = testMarker;
   const sourceId = "france-travail";
-  let persistedOfferId = null;
 
   try {
     const registered = await sql`SELECT id FROM sources WHERE id = ${sourceId} LIMIT 1`;
@@ -24,7 +24,10 @@ test("deux upserts PostgreSQL concurrents conservent une seule offre atomique", 
 
     const older = {
       observedAt: "2026-07-20T08:00:00.000Z",
-      offer: { titleOriginal: "Test concurrence ancien" },
+      offer: {
+        titleOriginal: "Test concurrence ancien",
+        employerNameOriginal: testMarker,
+      },
       source: {
         sourceId,
         externalId,
@@ -35,7 +38,10 @@ test("deux upserts PostgreSQL concurrents conservent une seule offre atomique", 
     const newer = {
       ...older,
       observedAt: "2026-07-20T09:00:00.000Z",
-      offer: { titleOriginal: "Test concurrence récent" },
+      offer: {
+        titleOriginal: "Test concurrence récent",
+        employerNameOriginal: testMarker,
+      },
       source: { ...older.source, rawPayload: { version: "récente" } },
     };
 
@@ -43,15 +49,15 @@ test("deux upserts PostgreSQL concurrents conservent une seule offre atomique", 
       upsertJobOfferFromSource(older),
       upsertJobOfferFromSource(newer),
     ]);
-    persistedOfferId = first.offer.id;
-    assert.equal(second.offer.id, persistedOfferId);
+    assert.equal(second.offer.id, first.offer.id);
 
     const counts = await sql`SELECT
-      (SELECT COUNT(*)::integer FROM job_offers WHERE id = ${persistedOfferId}) AS offers,
+      (SELECT COUNT(*)::integer FROM job_offers
+        WHERE employer_name_original = ${testMarker}) AS offers,
       (SELECT COUNT(*)::integer FROM job_offer_sources
         WHERE source_id = ${sourceId} AND external_id = ${externalId}) AS provenances,
       (SELECT COUNT(*)::integer FROM job_offers o
-        WHERE o.id = ${persistedOfferId} AND NOT EXISTS (
+        WHERE o.employer_name_original = ${testMarker} AND NOT EXISTS (
           SELECT 1 FROM job_offer_sources s WHERE s.job_offer_id = o.id
         )) AS orphans`;
     assert.equal(Number(counts[0].offers), 1);
@@ -67,7 +73,10 @@ test("deux upserts PostgreSQL concurrents conservent une seule offre atomique", 
 
     await assert.rejects(() => upsertJobOfferFromSource({
       observedAt: newer.observedAt,
-      offer: { titleOriginal: rollbackTitle },
+      offer: {
+        titleOriginal: "Test rollback",
+        employerNameOriginal: rollbackMarker,
+      },
       source: {
         sourceId: `source-absente-${randomUUID()}`,
         externalId: randomUUID(),
@@ -75,15 +84,17 @@ test("deux upserts PostgreSQL concurrents conservent une seule offre atomique", 
       },
     }));
     const rolledBack = await sql`SELECT COUNT(*)::integer AS count
-      FROM job_offers WHERE title_original = ${rollbackTitle}`;
+      FROM job_offers WHERE employer_name_original = ${rollbackMarker}`;
     assert.equal(Number(rolledBack[0].count), 0, "L'échec de provenance doit annuler l'offre");
   } finally {
-    await sql`WITH removed AS (
-      DELETE FROM job_offer_sources
-      WHERE source_id = ${sourceId} AND external_id = ${externalId}
-      RETURNING job_offer_id
-    ) DELETE FROM job_offers WHERE id IN (SELECT job_offer_id FROM removed)`;
-    await sql`DELETE FROM job_offers WHERE title_original = ${rollbackTitle}`;
+    await sql`DELETE FROM job_offer_sources
+      WHERE (source_id = ${sourceId} AND external_id = ${externalId})
+        OR job_offer_id IN (
+          SELECT id FROM job_offers
+          WHERE employer_name_original IN (${testMarker}, ${rollbackMarker})
+        )`;
+    await sql`DELETE FROM job_offers
+      WHERE employer_name_original IN (${testMarker}, ${rollbackMarker})`;
     if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = previousDatabaseUrl;
   }
