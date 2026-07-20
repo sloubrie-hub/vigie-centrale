@@ -17,6 +17,8 @@ test("la compatibilité des identifiants reste confinée à l'archivage", async 
   assert.doesNotMatch(route, /archiveItemsWithStore|watch_archive|INSERT|UPDATE|DELETE/);
   assert.match(store, /source = \$\{row\.source\} AND/);
   assert.match(store, /url = \$\{row\.url\}/);
+  assert.match(store, /CAST\(\$\{row\.youtube_video_id\} AS text\) IS NOT NULL/);
+  assert.doesNotMatch(store, /\$\{[^}]+\} IS (?:NOT )?NULL/);
 });
 
 test("la santé des sources reste calculée depuis l'historique, sans table de synthèse", async () => {
@@ -63,4 +65,5 @@ test("une erreur de journalisation de source ne rejette pas Promise.all", async 
   assert.match(runner, /Promise\.allSettled/);
   assert.match(collector, /Journalisation incomplète/);
   assert.match(collector, /Finalisation du run impossible/);
+  assert.match(collector, /finishCollectionRun\(\{ id: runId, status: "failed"/);
 });

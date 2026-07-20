@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { archiveItemsWithStore, matchesArchiveContent } from "../lib/archive-identity.ts";
+import { archiveItemsWithStore, matchesArchiveContent, prepareArchiveRow } from "../lib/archive-identity.ts";
 
 const item = (overrides = {}) => ({
   id: "content-1",
@@ -92,4 +92,18 @@ test("itemsStored compte les éléments traités et non les insertions physiques
   assert.equal(await archiveItemsWithStore([content], store.upsert), 1);
   assert.equal(await archiveItemsWithStore([content], store.upsert), 1);
   assert.equal(store.rows.length, 1);
+});
+
+test("une ligne RSS prépare explicitement un videoId nullable", () => {
+  const row = prepareArchiveRow(item({ id: "rss-stable", source: "Source RSS" }));
+  assert.equal(row.youtube_video_id, null);
+});
+
+test("une ligne YouTube prépare un videoId textuel", () => {
+  const row = prepareArchiveRow(item({
+    id: "youtube-video123",
+    source: "Jeef — YouTube",
+    url: "https://www.youtube.com/watch?v=video123",
+  }));
+  assert.equal(row.youtube_video_id, "video123");
 });

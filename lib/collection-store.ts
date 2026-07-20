@@ -64,7 +64,7 @@ export async function archiveItems(items: WatchItem[]) {
     await sql.transaction(rows.map((row) => sql`WITH target AS (
         SELECT source_id FROM watch_archive
         WHERE source_id = ${row.source_id} OR (source = ${row.source} AND (
-          url = ${row.url} OR (${row.youtube_video_id} IS NOT NULL AND (
+          url = ${row.url} OR (CAST(${row.youtube_video_id} AS text) IS NOT NULL AND (
             SUBSTRING(url FROM '[?&]v=([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
             OR SUBSTRING(url FROM 'youtu\\.be/([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
             OR SUBSTRING(url FROM '/shorts/([A-Za-z0-9_-]+)') = ${row.youtube_video_id}
