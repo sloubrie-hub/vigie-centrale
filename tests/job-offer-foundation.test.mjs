@@ -17,18 +17,24 @@ class MemoryJobOfferStore {
     const previousOffer = this.offers.get(offerId);
     const observedAt = input.observedAt;
 
+    const isNewest = !previousOffer || observedAt >= previousOffer.lastSeenAt;
     const nextOffer = {
+      ...(previousOffer ?? {}),
       ...input.offer,
       id: offerId,
       firstSeenAt: previousOffer?.firstSeenAt ?? observedAt,
-      lastSeenAt: observedAt,
+      lastSeenAt: previousOffer && previousOffer.lastSeenAt > observedAt
+        ? previousOffer.lastSeenAt : observedAt,
     };
     const nextSource = {
+      ...(previousSource ?? {}),
       ...input.source,
       id: sourceId,
       jobOfferId: offerId,
       firstSeenAt: previousSource?.firstSeenAt ?? observedAt,
-      lastSeenAt: observedAt,
+      rawPayload: isNewest ? input.source.rawPayload : previousSource.rawPayload,
+      lastSeenAt: previousSource && previousSource.lastSeenAt > observedAt
+        ? previousSource.lastSeenAt : observedAt,
     };
 
     // Simule le commit atomique de l'instruction PostgreSQL : aucun état partiel.
@@ -94,6 +100,19 @@ test("le même identifiant externe dans deux sources ne déclenche aucune fusion
   assert.equal(store.sources.size, 2);
 });
 
+test("une observation ancienne ne fait reculer ni last_seen_at ni le payload", () => {
+  const store = new MemoryJobOfferStore();
+  const recent = sample({ observedAt: "2026-07-20T10:00:00.000Z" });
+  recent.source.rawPayload = { version: "récente" };
+  store.upsert(recent);
+  const old = sample({ observedAt: "2026-07-20T08:00:00.000Z" });
+  old.source.rawPayload = { version: "ancienne" };
+  const result = store.upsert(old);
+  assert.equal(result.offer.lastSeenAt, "2026-07-20T10:00:00.000Z");
+  assert.equal(result.source.lastSeenAt, "2026-07-20T10:00:00.000Z");
+  assert.deepEqual(result.source.rawPayload, { version: "récente" });
+});
+
 test("un échec de provenance ne laisse aucune offre orpheline", () => {
   const store = new MemoryJobOfferStore();
   assert.throws(() => store.upsert(sample(), { failProvenance: true }), /Échec provenance/);
@@ -117,11 +136,17 @@ test("la migration définit les clés, contraintes et index du socle", async () 
 test("l'upsert SQL est atomique, concurrent et conserve l'identité canonique", async () => {
   const store = await read("lib/job-offer-store.ts");
   assert.match(store, /pg_advisory_xact_lock/);
-  assert.match(store, /WITH source_lock AS MATERIALIZED/);
+  assert.match(store, /sql\.transaction\(\(txn\) => \[/);
+  assert.match(store, /isolationLevel: "ReadCommitted"/);
+  assert.match(store, /txn`SELECT pg_advisory_xact_lock/);
+  assert.match(store, /txn`WITH existing_source AS MATERIALIZED/);
+  assert.doesNotMatch(store, /WITH source_lock AS MATERIALIZED/);
   assert.match(store, /ON CONFLICT \(source_id, external_id\) DO UPDATE/);
   assert.match(store, /WHERE id = \(SELECT job_offer_id FROM upserted_source\)/);
   assert.match(store, /SELECT \* FROM created_offer\s+UNION ALL\s+SELECT \* FROM updated_offer/);
-  assert.match(store, /raw_payload = EXCLUDED\.raw_payload/);
+  assert.match(store, /THEN EXCLUDED\.raw_payload ELSE current_source\.raw_payload END/);
+  assert.match(store, /GREATEST\(current_source\.last_seen_at, EXCLUDED\.last_seen_at\)/);
+  assert.match(store, /GREATEST\(last_seen_at, \$\{observedAt\}::timestamptz\)/);
   assert.match(store, /first_seen_at AS offer_first_seen_at/);
   assert.doesNotMatch(store, /CREATE TABLE|CREATE INDEX|ALTER TABLE|DROP TABLE/);
 });

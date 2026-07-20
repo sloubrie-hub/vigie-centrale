@@ -83,9 +83,9 @@ function validateInput(input: UpsertJobOfferFromSourceInput) {
 }
 
 /**
- * Crée ou actualise une offre et sa provenance en une seule instruction atomique.
- * Le verrou transactionnel sérialise uniquement une même paire source/externalId,
- * ce qui empêche deux créations concurrentes de laisser une offre orpheline.
+ * Crée ou actualise une offre et sa provenance dans une transaction atomique.
+ * Le verrou est acquis dans une première instruction : sous ReadCommitted,
+ * l'upsert suivant reçoit ainsi un snapshot postérieur à l'attente du verrou.
  */
 export async function upsertJobOfferFromSource(
   input: UpsertJobOfferFromSourceInput,
@@ -99,11 +99,13 @@ export async function upsertJobOfferFromSource(
   const source = input.source;
   const rawPayload = JSON.stringify(source.rawPayload);
 
-  const rows = await sql`WITH source_lock AS MATERIALIZED (
-      SELECT pg_advisory_xact_lock(hashtextextended(${source.sourceId} || chr(31) || ${source.externalId}, 0))
-    ), existing_source AS MATERIALIZED (
+  const transactionResults = await sql.transaction((txn) => [
+    txn`SELECT pg_advisory_xact_lock(
+      hashtextextended(${source.sourceId} || chr(31) || ${source.externalId}, 0)
+    )`,
+    txn`WITH existing_source AS MATERIALIZED (
       SELECT jos.job_offer_id
-      FROM job_offer_sources jos CROSS JOIN source_lock
+      FROM job_offer_sources jos
       WHERE jos.source_id = ${source.sourceId} AND jos.external_id = ${source.externalId}
     ), created_offer AS (
       INSERT INTO job_offers (
@@ -126,7 +128,6 @@ export async function upsertJobOfferFromSource(
         ${offer.longitude ?? null}, ${offer.romeCodeOriginal ?? null},
         ${offer.romeTitleOriginal ?? null}, ${observedAt}, ${observedAt},
         ${offer.active ?? true}, ${observedAt}, ${observedAt}
-      FROM source_lock
       WHERE NOT EXISTS (SELECT 1 FROM existing_source)
       RETURNING *
     ), resolved_offer AS (
@@ -134,7 +135,7 @@ export async function upsertJobOfferFromSource(
       UNION ALL
       SELECT id FROM created_offer
     ), upserted_source AS (
-      INSERT INTO job_offer_sources (
+      INSERT INTO job_offer_sources AS current_source (
         id, job_offer_id, source_id, external_id, source_url, raw_payload,
         first_seen_at, last_seen_at, created_at, updated_at
       )
@@ -143,34 +144,40 @@ export async function upsertJobOfferFromSource(
         ${observedAt}, ${observedAt}, ${observedAt}, ${observedAt}
       FROM resolved_offer
       ON CONFLICT (source_id, external_id) DO UPDATE SET
-        source_url = EXCLUDED.source_url,
-        raw_payload = EXCLUDED.raw_payload,
-        last_seen_at = EXCLUDED.last_seen_at,
-        updated_at = EXCLUDED.updated_at
+        source_url = CASE
+          WHEN EXCLUDED.last_seen_at >= current_source.last_seen_at
+          THEN EXCLUDED.source_url ELSE current_source.source_url END,
+        raw_payload = CASE
+          WHEN EXCLUDED.last_seen_at >= current_source.last_seen_at
+          THEN EXCLUDED.raw_payload ELSE current_source.raw_payload END,
+        last_seen_at = GREATEST(current_source.last_seen_at, EXCLUDED.last_seen_at),
+        updated_at = GREATEST(current_source.updated_at, EXCLUDED.updated_at)
       RETURNING *
     ), updated_offer AS (
       UPDATE job_offers SET
-        title_original = ${offer.titleOriginal},
-        title_normalized = ${offer.titleNormalized ?? null},
-        description_original = ${offer.descriptionOriginal ?? null},
-        contract_type_original = ${offer.contractTypeOriginal ?? null},
-        contract_type_normalized = ${offer.contractTypeNormalized ?? null},
-        salary_original = ${offer.salaryOriginal ?? null},
-        experience_original = ${offer.experienceOriginal ?? null},
-        qualification_original = ${offer.qualificationOriginal ?? null},
-        working_time_original = ${offer.workingTimeOriginal ?? null},
-        publication_date = ${offer.publicationDate ?? null},
-        employer_name_original = ${offer.employerNameOriginal ?? null},
-        employer_siret = ${offer.employerSiret ?? null},
-        employer_siren = ${offer.employerSiren ?? null},
-        location_label_original = ${offer.locationLabelOriginal ?? null},
-        postal_code = ${offer.postalCode ?? null},
-        insee_code = ${offer.inseeCode ?? null},
-        latitude = ${offer.latitude ?? null},
-        longitude = ${offer.longitude ?? null},
-        rome_code_original = ${offer.romeCodeOriginal ?? null},
-        rome_title_original = ${offer.romeTitleOriginal ?? null},
-        last_seen_at = ${observedAt}, active = ${offer.active ?? true}, updated_at = ${observedAt}
+        title_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.titleOriginal} ELSE title_original END,
+        title_normalized = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.titleNormalized ?? null} ELSE title_normalized END,
+        description_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.descriptionOriginal ?? null} ELSE description_original END,
+        contract_type_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.contractTypeOriginal ?? null} ELSE contract_type_original END,
+        contract_type_normalized = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.contractTypeNormalized ?? null} ELSE contract_type_normalized END,
+        salary_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.salaryOriginal ?? null} ELSE salary_original END,
+        experience_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.experienceOriginal ?? null} ELSE experience_original END,
+        qualification_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.qualificationOriginal ?? null} ELSE qualification_original END,
+        working_time_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.workingTimeOriginal ?? null} ELSE working_time_original END,
+        publication_date = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.publicationDate ?? null} ELSE publication_date END,
+        employer_name_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.employerNameOriginal ?? null} ELSE employer_name_original END,
+        employer_siret = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.employerSiret ?? null} ELSE employer_siret END,
+        employer_siren = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.employerSiren ?? null} ELSE employer_siren END,
+        location_label_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.locationLabelOriginal ?? null} ELSE location_label_original END,
+        postal_code = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.postalCode ?? null} ELSE postal_code END,
+        insee_code = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.inseeCode ?? null} ELSE insee_code END,
+        latitude = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.latitude ?? null} ELSE latitude END,
+        longitude = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.longitude ?? null} ELSE longitude END,
+        rome_code_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.romeCodeOriginal ?? null} ELSE rome_code_original END,
+        rome_title_original = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.romeTitleOriginal ?? null} ELSE rome_title_original END,
+        last_seen_at = GREATEST(last_seen_at, ${observedAt}::timestamptz),
+        active = CASE WHEN ${observedAt}::timestamptz >= last_seen_at THEN ${offer.active ?? true} ELSE active END,
+        updated_at = GREATEST(updated_at, ${observedAt}::timestamptz)
       WHERE id = (SELECT job_offer_id FROM upserted_source)
         AND EXISTS (SELECT 1 FROM existing_source)
       RETURNING *
@@ -190,7 +197,10 @@ export async function upsertJobOfferFromSource(
       s.source_url, s.raw_payload, s.first_seen_at AS source_first_seen_at,
       s.last_seen_at AS source_last_seen_at, s.created_at AS source_created_at,
       s.updated_at AS source_updated_at
-    FROM resolved_offer_row o JOIN upserted_source s ON s.job_offer_id = o.id`;
+    FROM resolved_offer_row o JOIN upserted_source s ON s.job_offer_id = o.id`,
+  ], { isolationLevel: "ReadCommitted" });
+
+  const rows = transactionResults[1];
 
   if (rows.length !== 1) throw new Error("La persistance atomique de l’offre a échoué");
   const row = rows[0] as Record<string, unknown>;
