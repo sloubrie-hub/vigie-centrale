@@ -3,11 +3,21 @@ import type { SourceDefinition, SourceRunStatus, WatchItem } from "./watch-types
 
 export const SOURCE_TIMEOUT_MS = 20_000;
 
-export type CollectorTask = { source: SourceDefinition; run: () => Promise<WatchItem[]> };
+export type CollectorOutput = {
+  items: WatchItem[];
+  itemsCollected: number;
+};
+export type CollectorTask = {
+  source: SourceDefinition;
+  run: () => Promise<CollectorOutput>;
+  timeoutMs?: number;
+};
 export type CollectorTaskResult = {
   ok: boolean;
   journaled: boolean;
   items: WatchItem[];
+  itemsCollected: number;
+  itemsPublished: number;
   sourceId: string;
   errorMessage?: string;
 };
@@ -18,9 +28,14 @@ type SourceRunRecorder = (input: {
   finishedAt: string;
   status: SourceRunStatus;
   itemsCollected: number;
+  itemsPublished: number;
   durationMs: number;
   errorMessage?: string;
 }) => Promise<void>;
+
+export function publishAll(items: WatchItem[]): CollectorOutput {
+  return { items, itemsCollected: items.length };
+}
 
 export async function withSourceTimeout<T>(operation: Promise<T>, timeoutMs = SOURCE_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -42,15 +57,20 @@ export async function withSourceTimeout<T>(operation: Promise<T>, timeoutMs = SO
 async function executeTask(task: CollectorTask, collectionRunId: string, record: SourceRunRecorder): Promise<CollectorTaskResult> {
   const startedAt = new Date();
   let ok = false;
-  let items: WatchItem[] = [];
+  let output: CollectorOutput = { items: [], itemsCollected: 0 };
   let errorMessage: string | undefined;
   try {
-    items = await withSourceTimeout(Promise.resolve().then(task.run));
+    output = await withSourceTimeout(Promise.resolve().then(task.run), task.timeoutMs ?? SOURCE_TIMEOUT_MS);
+    if (!Number.isInteger(output.itemsCollected) || output.itemsCollected < output.items.length) {
+      throw new CollectorDiagnosticError("Métriques collecteur invalides", "invalid_response");
+    }
     ok = true;
   } catch (error) {
     errorMessage = safeDiagnostic(error);
+    output = { items: [], itemsCollected: 0 };
   }
   const finishedAt = new Date();
+  const itemsPublished = output.items.length;
   try {
     await record({
       collectionRunId,
@@ -58,14 +78,31 @@ async function executeTask(task: CollectorTask, collectionRunId: string, record:
       startedAt: startedAt.toISOString(),
       finishedAt: finishedAt.toISOString(),
       status: ok ? "completed" : "failed",
-      itemsCollected: ok ? items.length : 0,
+      itemsCollected: output.itemsCollected,
+      itemsPublished,
       durationMs: finishedAt.getTime() - startedAt.getTime(),
       errorMessage,
     });
-    return { ok, journaled: true, items, sourceId: task.source.id, errorMessage };
+    return {
+      ok,
+      journaled: true,
+      items: output.items,
+      itemsCollected: output.itemsCollected,
+      itemsPublished,
+      sourceId: task.source.id,
+      errorMessage,
+    };
   } catch (journalError) {
     console.error(`Journalisation impossible pour la source ${task.source.id}`, journalError);
-    return { ok, journaled: false, items, sourceId: task.source.id, errorMessage };
+    return {
+      ok,
+      journaled: false,
+      items: output.items,
+      itemsCollected: output.itemsCollected,
+      itemsPublished,
+      sourceId: task.source.id,
+      errorMessage,
+    };
   }
 }
 
@@ -75,6 +112,8 @@ export async function executeCollectorTasks(tasks: CollectorTask[], collectionRu
     ok: false,
     journaled: false,
     items: [],
+    itemsCollected: 0,
+    itemsPublished: 0,
     sourceId: tasks[index].source.id,
     errorMessage: safeDiagnostic(result.reason),
   }));

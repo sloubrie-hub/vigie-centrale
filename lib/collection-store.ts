@@ -35,25 +35,27 @@ export async function startCollectionRun(sourceTotal: number) {
 
 export async function recordSourceRun(input: {
   collectionRunId: string; sourceId: string; startedAt: string; finishedAt: string;
-  status: SourceRunStatus; itemsCollected: number; durationMs: number; errorMessage?: string;
+  status: SourceRunStatus; itemsCollected: number; itemsPublished: number;
+  durationMs: number; errorMessage?: string;
 }) {
   const sql = requireDatabase();
   await sql`INSERT INTO source_runs (
     id, collection_run_id, source_id, started_at, finished_at, status,
-    items_collected, duration_ms, error_message
+    items_collected, items_published, duration_ms, error_message
   ) VALUES (${randomUUID()}, ${input.collectionRunId}, ${input.sourceId}, ${input.startedAt},
-    ${input.finishedAt}, ${input.status}, ${input.itemsCollected}, ${input.durationMs},
-    ${input.errorMessage || null})`;
+    ${input.finishedAt}, ${input.status}, ${input.itemsCollected}, ${input.itemsPublished},
+    ${input.durationMs}, ${input.errorMessage || null})`;
 }
 
 export async function finishCollectionRun(input: {
   id: string; status: CollectionStatus; succeeded: number; failed: number;
-  itemsCollected: number; itemsStored: number; errorMessage?: string;
+  itemsCollected: number; itemsPublished: number; itemsStored: number; errorMessage?: string;
 }) {
   const sql = requireDatabase();
   await sql`UPDATE collection_runs SET finished_at = NOW(), status = ${input.status},
     source_succeeded = ${input.succeeded}, source_failed = ${input.failed},
-    items_collected = ${input.itemsCollected}, items_stored = ${input.itemsStored},
+    items_collected = ${input.itemsCollected}, items_published = ${input.itemsPublished},
+    items_stored = ${input.itemsStored},
     error_message = ${input.errorMessage || null}
     WHERE id = ${input.id}`;
 }
@@ -117,17 +119,23 @@ export async function readCollectionState(): Promise<{ collection: CollectionSum
   let runRows;
   let sourceRows;
   try {
-    runRows = await sql`SELECT id, status, started_at, finished_at, source_total,
-      source_succeeded, source_failed, items_collected, items_stored, error_message
-      FROM collection_runs ORDER BY started_at DESC LIMIT 1`;
+    runRows = await sql`SELECT cr.id, cr.status, cr.started_at, cr.finished_at, cr.source_total,
+      cr.source_succeeded, cr.source_failed, cr.items_collected,
+      COALESCE((to_jsonb(cr)->>'items_published')::integer, cr.items_collected) AS items_published,
+      cr.items_stored, cr.error_message
+      FROM collection_runs cr ORDER BY cr.started_at DESC LIMIT 1`;
     sourceRows = await sql`
       SELECT s.id, s.name, s.theme, s.connector_type, s.active,
-        rr.collection_run_id, rr.status, rr.started_at, rr.finished_at, rr.items_collected,
+        rr.collection_run_id, rr.status, rr.started_at, rr.finished_at,
+        rr.items_collected, rr.items_published,
         rr.duration_ms, rr.error_message, ls.last_success_at, le.last_error_message
       FROM sources s
       LEFT JOIN LATERAL (
-        SELECT collection_run_id, status, started_at, finished_at, items_collected, duration_ms, error_message
-        FROM source_runs WHERE source_id = s.id ORDER BY finished_at DESC LIMIT ${HEALTH_WINDOW_SIZE}
+        SELECT sr.collection_run_id, sr.status, sr.started_at, sr.finished_at, sr.items_collected,
+          COALESCE((to_jsonb(sr)->>'items_published')::integer, sr.items_collected) AS items_published,
+          sr.duration_ms, sr.error_message
+        FROM source_runs sr WHERE sr.source_id = s.id
+        ORDER BY sr.finished_at DESC LIMIT ${HEALTH_WINDOW_SIZE}
       ) rr ON TRUE
       LEFT JOIN LATERAL (
         SELECT finished_at AS last_success_at FROM source_runs
@@ -164,6 +172,7 @@ export async function readCollectionState(): Promise<{ collection: CollectionSum
         startedAt: new Date(String(row.started_at)).toISOString(),
         finishedAt: new Date(String(row.finished_at)).toISOString(),
         itemsCollected: Number(row.items_collected || 0),
+        itemsPublished: Number(row.items_published || 0),
         durationMs: Number(row.duration_ms || 0),
         errorMessage: row.error_message ? String(row.error_message) : null,
       });
@@ -183,6 +192,7 @@ export async function readCollectionState(): Promise<{ collection: CollectionSum
       finishedAt: run.finished_at ? new Date(String(run.finished_at)).toISOString() : null,
       sourceTotal: Number(run.source_total), sourceSucceeded: Number(run.source_succeeded),
       sourceFailed: Number(run.source_failed), itemsCollected: Number(run.items_collected),
+      itemsPublished: Number(run.items_published),
       itemsStored: Number(run.items_stored), errorMessage: run.error_message ? String(run.error_message) : null,
     };
   }

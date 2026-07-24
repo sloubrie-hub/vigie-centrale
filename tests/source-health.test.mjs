@@ -12,6 +12,7 @@ const run = (status, day, errorMessage = null, collectionRunId = "run-1") => ({
   startedAt: `2026-07-${String(day).padStart(2, "0")}T08:00:00.000Z`,
   finishedAt: `2026-07-${String(day).padStart(2, "0")}T08:00:01.000Z`,
   itemsCollected: status === "completed" ? 12 : 0,
+  itemsPublished: status === "completed" ? 3 : 0,
   durationMs: 1000,
   errorMessage,
 });
@@ -19,7 +20,7 @@ const collection = (status = "completed") => ({
   id: "run-1", status, startedAt: "2026-07-19T08:00:00.000Z",
   finishedAt: "2026-07-19T08:01:00.000Z", sourceTotal: 14,
   sourceSucceeded: status === "completed" ? 14 : 13, sourceFailed: status === "completed" ? 0 : 1,
-  itemsCollected: 42, itemsStored: 42, errorMessage: null,
+  itemsCollected: 42, itemsPublished: 20, itemsStored: 20, errorMessage: null,
 });
 
 test("la fenêtre de santé est limitée aux 10 derniers runs", () => {

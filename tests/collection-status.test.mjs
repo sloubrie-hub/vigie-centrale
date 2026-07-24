@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveCollectionStatus, summarizeSourceResults } from "../lib/collection-status.ts";
+import { deriveCollectionStatus, summarizeCollectionMetrics, summarizeSourceResults } from "../lib/collection-status.ts";
 
 test("une collecte sans échec est complète", () => {
   assert.equal(deriveCollectionStatus(14, 0), "completed");
@@ -20,4 +20,15 @@ test("une source collectée mais non journalisée rend le run partiel", () => {
   ]);
   assert.deepEqual(summary, { succeeded: 1, failed: 1 });
   assert.equal(deriveCollectionStatus(summary.succeeded, summary.failed), "partial");
+});
+
+test("les métriques globales additionnent le collecté et le publié séparément", () => {
+  assert.deepEqual(summarizeCollectionMetrics([
+    { itemsCollected: 240, itemsPublished: 3 },
+    { itemsCollected: 6, itemsPublished: 6 },
+  ], 7), {
+    itemsCollected: 246,
+    itemsPublished: 9,
+    itemsStored: 7,
+  });
 });
