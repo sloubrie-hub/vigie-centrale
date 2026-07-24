@@ -2,11 +2,18 @@ import { archiveItems, finishCollectionRun, recordSourceRun, registerSources, st
 import { executeCollectorTasks, type CollectorTask } from "@/lib/collector-runner";
 import { deriveCollectionStatus, summarizeSourceResults } from "@/lib/collection-status";
 import { CollectorDiagnosticError, requestJson, requestText } from "@/lib/http-client";
+import {
+  createFranceTravailSearches,
+  franceTravailOfferUrl,
+  persistFranceTravailOffers,
+  selectRelevantFranceTravailOffers,
+  type FranceTravailOffer,
+} from "@/lib/france-travail-job-offer";
+import { upsertJobOfferFromSource } from "@/lib/job-offer-store";
 import { parseRssFeed, parseYoutubeFeed } from "@/lib/xml-feeds";
 import type { SourceDefinition, WatchItem, WatchTheme } from "@/lib/watch-types";
 
 type BlizzardEntry = { contentId: string; properties?: { title?: string; category?: string; summary?: string; lastUpdated?: string; publishDate?: string; newsUrl?: string } };
-type FranceOffer = { id: string; intitule: string; description?: string; dateCreation?: string; typeContrat?: string; lieuTravail?: { libelle?: string; codePostal?: string }; entreprise?: { nom?: string }; origineOffre?: { urlOrigine?: string } };
 
 const clean = (value = "") => value
   .replace(/<!\[CDATA\[|\]\]>/g, "").replace(/<[^>]+>/g, " ")
@@ -53,32 +60,29 @@ async function franceTravail(): Promise<WatchItem[]> {
   if (typeof token !== "string" || !token.trim()) {
     throw new CollectorDiagnosticError("OAuth France Travail : jeton absent ou invalide", "invalid_response");
   }
-  const searches = [
-    new URLSearchParams({ departement: "47", range: "0-149", sort: "1" }),
-    new URLSearchParams({ commune: "33227", distance: "45", range: "0-149", sort: "1" }),
-  ];
+  const searches = createFranceTravailSearches();
   const payloads = await Promise.all(searches.map(async (params) => {
     const payload = await requestJson<{ resultats?: unknown }>(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, {
       label: "API France Travail",
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       allowEmpty: true,
     });
-    if (payload === null) return { resultats: [] as FranceOffer[] };
+    if (payload === null) return { resultats: [] as FranceTravailOffer[] };
     if (!Array.isArray(payload.resultats)) {
       throw new CollectorDiagnosticError("API France Travail : réponse JSON inattendue", "invalid_response");
     }
     const invalidOffer = payload.resultats.some((offer) => !offer || typeof offer !== "object"
-      || typeof (offer as FranceOffer).id !== "string" || typeof (offer as FranceOffer).intitule !== "string");
+      || typeof (offer as FranceTravailOffer).id !== "string" || typeof (offer as FranceTravailOffer).intitule !== "string");
     if (invalidOffer) throw new CollectorDiagnosticError("API France Travail : offre invalide dans la réponse", "invalid_response");
-    return { resultats: payload.resultats as FranceOffer[] };
+    return { resultats: payload.resultats as FranceTravailOffer[] };
   }));
-  const uniqueOffers = [...new Map(payloads.flatMap((data) => data.resultats).map((offer) => [offer.id, offer])).values()];
-  const relevant = uniqueOffers.filter((offer) => /insertion|conseiller.*emploi|accompagnement.*professionnel|référent.*insertion|chargé.*insertion|mission locale|formateur.*insertion|éducateur.*spécialisé|orientation professionnelle/i.test(offer.intitule)).slice(0, 20);
+  const relevant = selectRelevantFranceTravailOffers(payloads);
   const checkedAt = new Date().toISOString();
+  await persistFranceTravailOffers(relevant, checkedAt, upsertJobOfferFromSource);
   return relevant.map((offer) => ({
     id: `ft-${offer.id}`, theme: "Emploi" as const, kind: "live" as const, date: offer.dateCreation || checkedAt,
     title: offer.intitule, summary: clean(offer.description).slice(0, 280), source: "France Travail — API officielle",
-    url: offer.origineOffre?.urlOrigine || `https://candidat.francetravail.fr/offres/recherche/detail/${offer.id}`,
+    url: franceTravailOfferUrl(offer),
     priority: /Marmande|La Réole|Langon/i.test(offer.lieuTravail?.libelle || "") ? "Haute" as const : "Moyenne" as const,
     tags: [offer.lieuTravail?.libelle, offer.typeContrat, offer.entreprise?.nom].filter((tag): tag is string => Boolean(tag)),
   }));
