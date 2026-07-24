@@ -161,15 +161,13 @@ test("les types distinguent entrées, enregistrements et JSON sans any", async (
   assert.doesNotMatch(types, /\bany\b/);
 });
 
-test("le Lot 4A ne modifie ni collecte, ni archive, ni routes publiques", async () => {
+test("le modèle Emploi ne modifie ni archive générique, ni routes publiques", async () => {
   const publicRoute = await read("app/api/veille/route.ts");
   const cronRoute = await read("app/api/cron/archive/route.ts");
-  const collector = await read("lib/collector.ts");
   const collectionStore = await read("lib/collection-store.ts");
 
   assert.doesNotMatch(publicRoute, /job_offers|job_offer_sources|upsertJobOffer/);
   assert.doesNotMatch(publicRoute, /runCollection|fetch\(|INSERT|UPDATE|DELETE/);
   assert.match(cronRoute, /authorization/);
-  assert.doesNotMatch(collector, /job_offers|upsertJobOffer/);
   assert.doesNotMatch(collectionStore, /job_offers|job_offer_sources/);
 });
