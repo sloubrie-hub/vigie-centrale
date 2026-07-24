@@ -1,9 +1,10 @@
 import { archiveItems, finishCollectionRun, recordSourceRun, registerSources, startCollectionRun } from "@/lib/collection-store";
-import { executeCollectorTasks, type CollectorTask } from "@/lib/collector-runner";
-import { deriveCollectionStatus, summarizeSourceResults } from "@/lib/collection-status";
+import { executeCollectorTasks, publishAll, type CollectorOutput, type CollectorTask } from "@/lib/collector-runner";
+import { deriveCollectionStatus, summarizeCollectionMetrics, summarizeSourceResults } from "@/lib/collection-status";
 import { CollectorDiagnosticError, requestJson, requestText } from "@/lib/http-client";
 import {
   createFranceTravailSearches,
+  deduplicateFranceTravailOffers,
   franceTravailOfferUrl,
   persistFranceTravailOffers,
   selectRelevantFranceTravailOffers,
@@ -14,6 +15,7 @@ import { parseRssFeed, parseYoutubeFeed } from "@/lib/xml-feeds";
 import type { SourceDefinition, WatchItem, WatchTheme } from "@/lib/watch-types";
 
 type BlizzardEntry = { contentId: string; properties?: { title?: string; category?: string; summary?: string; lastUpdated?: string; publishDate?: string; newsUrl?: string } };
+const FRANCE_TRAVAIL_TIMEOUT_MS = 120_000;
 
 const clean = (value = "") => value
   .replace(/<!\[CDATA\[|\]\]>/g, "").replace(/<[^>]+>/g, " ")
@@ -47,7 +49,7 @@ async function blizzard(product: "diablo-4" | "hearthstone", theme: WatchTheme):
   }).filter((item) => item.url && item.title);
 }
 
-async function franceTravail(): Promise<WatchItem[]> {
+async function franceTravail(): Promise<CollectorOutput> {
   const clientId = process.env.FRANCE_TRAVAIL_CLIENT_ID;
   const clientSecret = process.env.FRANCE_TRAVAIL_CLIENT_SECRET;
   if (!clientId || !clientSecret) throw new Error("Identifiants OAuth France Travail requis");
@@ -76,16 +78,18 @@ async function franceTravail(): Promise<WatchItem[]> {
     if (invalidOffer) throw new CollectorDiagnosticError("API France Travail : offre invalide dans la réponse", "invalid_response");
     return { resultats: payload.resultats as FranceTravailOffer[] };
   }));
-  const relevant = selectRelevantFranceTravailOffers(payloads);
+  const uniqueOffers = deduplicateFranceTravailOffers(payloads);
   const checkedAt = new Date().toISOString();
-  await persistFranceTravailOffers(relevant, checkedAt, upsertJobOfferFromSource);
-  return relevant.map((offer) => ({
+  await persistFranceTravailOffers(uniqueOffers, checkedAt, upsertJobOfferFromSource);
+  const relevant = selectRelevantFranceTravailOffers(uniqueOffers);
+  const items = relevant.map((offer) => ({
     id: `ft-${offer.id}`, theme: "Emploi" as const, kind: "live" as const, date: offer.dateCreation || checkedAt,
     title: offer.intitule, summary: clean(offer.description).slice(0, 280), source: "France Travail — API officielle",
     url: franceTravailOfferUrl(offer),
     priority: /Marmande|La Réole|Langon/i.test(offer.lieuTravail?.libelle || "") ? "Haute" as const : "Moyenne" as const,
     tags: [offer.lieuTravail?.libelle, offer.typeContrat, offer.entreprise?.nom].filter((tag): tag is string => Boolean(tag)),
   }));
+  return { items, itemsCollected: uniqueOffers.length };
 }
 
 const youtubeChannels = [
@@ -113,17 +117,17 @@ export const sourceDefinitions: SourceDefinition[] = [
 function createTasks(): CollectorTask[] {
   const get = (id: string) => sourceDefinitions.find((source) => source.id === id)!;
   return [
-    { source: get("blizzard-diablo-4"), run: () => blizzard("diablo-4", "Diablo 4") },
-    { source: get("blizzard-hearthstone"), run: () => blizzard("hearthstone", "Hearthstone") },
-    { source: get("rss-ministere-travail"), run: async () => parseRssFeed((await requestText("https://travail-emploi.gouv.fr/rss.xml", { label: "RSS Ministère du Travail", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Ministère du Travail", "CIP & réglementation", ["Emploi", "Officiel"], 6) },
-    { source: get("rss-unml"), run: async () => parseRssFeed((await requestText("https://www.unml.info/feed/", { label: "RSS UNML", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "UNML", "CIP & réglementation", ["Mission Locale", "Réseau"], 5) },
-    { source: get("rss-google"), run: async () => parseRssFeed((await requestText("https://blog.google/rss/", { label: "RSS Google", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Google — blog officiel", "Tech & gadgets", ["Google", "Produit"], 4) },
-    { source: get("rss-microsoft"), run: async () => parseRssFeed((await requestText("https://blogs.microsoft.com/feed/", { label: "RSS Microsoft", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Microsoft — blog officiel", "Tech & gadgets", ["Microsoft", "Produit"], 4) },
+    { source: get("blizzard-diablo-4"), run: async () => publishAll(await blizzard("diablo-4", "Diablo 4")) },
+    { source: get("blizzard-hearthstone"), run: async () => publishAll(await blizzard("hearthstone", "Hearthstone")) },
+    { source: get("rss-ministere-travail"), run: async () => publishAll(parseRssFeed((await requestText("https://travail-emploi.gouv.fr/rss.xml", { label: "RSS Ministère du Travail", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Ministère du Travail", "CIP & réglementation", ["Emploi", "Officiel"], 6)) },
+    { source: get("rss-unml"), run: async () => publishAll(parseRssFeed((await requestText("https://www.unml.info/feed/", { label: "RSS UNML", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "UNML", "CIP & réglementation", ["Mission Locale", "Réseau"], 5)) },
+    { source: get("rss-google"), run: async () => publishAll(parseRssFeed((await requestText("https://blog.google/rss/", { label: "RSS Google", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Google — blog officiel", "Tech & gadgets", ["Google", "Produit"], 4)) },
+    { source: get("rss-microsoft"), run: async () => publishAll(parseRssFeed((await requestText("https://blogs.microsoft.com/feed/", { label: "RSS Microsoft", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Microsoft — blog officiel", "Tech & gadgets", ["Microsoft", "Produit"], 4)) },
     ...youtubeChannels.map((channel) => ({
       source: get(channel.id),
-      run: async () => parseYoutubeFeed((await requestText(`https://www.youtube.com/feeds/videos.xml?channel_id=${channel.channelId}`, { label: `YouTube ${channel.creator}`, headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, channel.creator, channel.theme, 2),
+      run: async () => publishAll(parseYoutubeFeed((await requestText(`https://www.youtube.com/feeds/videos.xml?channel_id=${channel.channelId}`, { label: `YouTube ${channel.creator}`, headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, channel.creator, channel.theme, 2)),
     })),
-    { source: get("france-travail"), run: franceTravail },
+    { source: get("france-travail"), run: franceTravail, timeoutMs: FRANCE_TRAVAIL_TIMEOUT_MS },
   ];
 }
 
@@ -142,12 +146,25 @@ export async function runCollection() {
   let stored = 0;
   try {
     stored = await archiveItems(items);
-    await finishCollectionRun({ id: runId, status, succeeded, failed, itemsCollected: items.length, itemsStored: stored, errorMessage: journalError });
-    return { id: runId, status, collected: items.length, stored, sourceTotal: results.length, sourceSucceeded: succeeded, sourceFailed: failed, warning: journalError };
+    const metrics = summarizeCollectionMetrics(results, stored);
+    await finishCollectionRun({ id: runId, status, succeeded, failed, ...metrics, errorMessage: journalError });
+    return {
+      id: runId,
+      status,
+      collected: metrics.itemsPublished,
+      published: metrics.itemsPublished,
+      ...metrics,
+      stored,
+      sourceTotal: results.length,
+      sourceSucceeded: succeeded,
+      sourceFailed: failed,
+      warning: journalError,
+    };
   } catch (error) {
     const primaryError = error instanceof Error ? error.message : "Erreur de persistance inconnue";
+    const metrics = summarizeCollectionMetrics(results, stored);
     try {
-      await finishCollectionRun({ id: runId, status: "failed", succeeded, failed: Math.max(failed, 1), itemsCollected: items.length, itemsStored: stored, errorMessage: primaryError.slice(0, 500) });
+      await finishCollectionRun({ id: runId, status: "failed", succeeded, failed: Math.max(failed, 1), ...metrics, errorMessage: primaryError.slice(0, 500) });
     } catch (finalizationError) {
       const finalMessage = finalizationError instanceof Error ? finalizationError.message : "Erreur inconnue";
       console.error(`Finalisation impossible pour le run ${runId}`, finalizationError);
