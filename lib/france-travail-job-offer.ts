@@ -47,12 +47,17 @@ export function franceTravailOfferUrl(offer: FranceTravailOffer): string {
 }
 
 export function selectRelevantFranceTravailOffers(
+  offers: FranceTravailOffer[],
+): FranceTravailOffer[] {
+  return offers.filter((offer) => RELEVANT_JOB_PATTERN.test(offer.intitule)).slice(0, 20);
+}
+
+export function deduplicateFranceTravailOffers(
   payloads: Array<{ resultats: FranceTravailOffer[] }>,
 ): FranceTravailOffer[] {
-  const uniqueOffers = [...new Map(
+  return [...new Map(
     payloads.flatMap((data) => data.resultats).map((offer) => [offer.id, offer]),
   ).values()];
-  return uniqueOffers.filter((offer) => RELEVANT_JOB_PATTERN.test(offer.intitule)).slice(0, 20);
 }
 
 function optionalText(value: unknown): string | null {
@@ -121,7 +126,7 @@ export async function persistFranceTravailOffers(
   offers: FranceTravailOffer[],
   observedAt: string,
   upsert: JobOfferUpsert,
-  concurrency = 5,
+  concurrency = 10,
 ): Promise<void> {
   const failures: unknown[] = [];
   let cursor = 0;
