@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   createFranceTravailSearches,
+  deduplicateFranceTravailOffers,
   persistFranceTravailOffers,
   selectRelevantFranceTravailOffers,
   toJobOfferUpsertInput,
@@ -108,27 +109,46 @@ test("les deux recherches géographiques restent strictement bornées", () => {
   assert.doesNotMatch(serialized, /33227|distance=45/);
 });
 
-test("seules les offres dédupliquées, filtrées et limitées à 20 sont persistées", async () => {
+test("toutes les offres uniques sont persistées, puis seules 20 offres pertinentes sont publiées", async () => {
   const relevant = Array.from({ length: 22 }, (_, index) => ({
     id: `REL-${index}`,
     intitule: `Conseiller emploi ${index}`,
   }));
   const duplicate = { ...relevant[0], description: "Version du second périmètre" };
   const irrelevant = { id: "OTHER", intitule: "Développeur web" };
-  const selected = selectRelevantFranceTravailOffers([
+  const unique = deduplicateFranceTravailOffers([
     { resultats: [...relevant, irrelevant] },
     { resultats: [duplicate] },
   ]);
+  const selected = selectRelevantFranceTravailOffers(unique);
   const persisted = [];
-  await persistFranceTravailOffers(selected, observedAt, async (input) => {
+  await persistFranceTravailOffers(unique, observedAt, async (input) => {
     persisted.push(input);
     return { offer: { id: input.source.externalId }, source: {} };
   });
   assert.equal(selected.length, 20);
-  assert.equal(persisted.length, 20);
-  assert.equal(new Set(persisted.map((input) => input.source.externalId)).size, 20);
-  assert.equal(persisted.some((input) => input.source.externalId === "OTHER"), false);
+  assert.equal(unique.length, 23);
+  assert.equal(persisted.length, 23);
+  assert.equal(new Set(persisted.map((input) => input.source.externalId)).size, 23);
+  assert.equal(persisted.some((input) => input.source.externalId === "OTHER"), true);
+  assert.equal(selected.some((offer) => offer.id === "OTHER"), false);
   assert.equal(persisted.every((input) => input.observedAt === observedAt), true);
+});
+
+test("250 offres non-CIP sont toutes structurées sans produire de carte Emploi", async () => {
+  const payloads = [
+    { resultats: Array.from({ length: 150 }, (_, index) => ({ id: `A-${index}`, intitule: `Métier technique ${index}` })) },
+    { resultats: Array.from({ length: 100 }, (_, index) => ({ id: `B-${index}`, intitule: `Métier commercial ${index}` })) },
+  ];
+  const unique = deduplicateFranceTravailOffers(payloads);
+  const persisted = [];
+  await persistFranceTravailOffers(unique, observedAt, async (input) => {
+    persisted.push(input.source.externalId);
+    return { offer: {}, source: {} };
+  });
+  assert.equal(unique.length, 250);
+  assert.equal(persisted.length, 250);
+  assert.deepEqual(selectRelevantFranceTravailOffers(unique), []);
 });
 
 test("tous les upserts sont attendus avant un échec de persistance aseptisé", async () => {
@@ -152,11 +172,16 @@ test("tous les upserts sont attendus avant un échec de persistance aseptisé", 
   assert.equal(attempts, offers.length);
 });
 
-test("le collecteur persiste relevant avant de produire le flux historique inchangé", async () => {
+test("le collecteur persiste tout le marché avant le filtre historique inchangé", async () => {
   const collector = await read("lib/collector.ts");
-  assert.match(collector, /const relevant = selectRelevantFranceTravailOffers\(payloads\)/);
-  assert.match(collector, /await persistFranceTravailOffers\(relevant, checkedAt, upsertJobOfferFromSource\)/);
-  assert.doesNotMatch(collector, /persistFranceTravailOffers\(uniqueOffers/);
+  assert.match(collector, /const uniqueOffers = deduplicateFranceTravailOffers\(payloads\)/);
+  assert.match(collector, /await persistFranceTravailOffers\(uniqueOffers, checkedAt, upsertJobOfferFromSource\)/);
+  assert.match(collector, /const relevant = selectRelevantFranceTravailOffers\(uniqueOffers\)/);
+  assert.ok(
+    collector.indexOf("persistFranceTravailOffers(uniqueOffers")
+      < collector.indexOf("selectRelevantFranceTravailOffers(uniqueOffers"),
+  );
+  assert.match(collector, /return \{ items, itemsCollected: uniqueOffers\.length \}/);
   assert.match(collector, /id: `ft-\$\{offer\.id\}`/);
   assert.match(collector, /summary: clean\(offer\.description\)\.slice\(0, 280\)/);
   assert.match(collector, /source: "France Travail — API officielle"/);
