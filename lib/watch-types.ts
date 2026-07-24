@@ -65,6 +65,7 @@ export type CollectionSummary = {
   sourceSucceeded: number;
   sourceFailed: number;
   itemsCollected: number;
+  itemsPublished: number;
   itemsStored: number;
   errorMessage: string | null;
 } | null;
