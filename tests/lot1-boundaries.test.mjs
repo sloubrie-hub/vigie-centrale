@@ -4,6 +4,18 @@ import test from "node:test";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
+test("la taxonomie et la navigation exposent IA sans perdre les thèmes historiques", async () => {
+  const types = await read("lib/watch-types.ts");
+  const dashboard = await read("app/dashboard-client.tsx");
+  const expectedThemes = ["Diablo 4", "Hearthstone", "Emploi", "CIP & réglementation", "Tech & gadgets", "IA"];
+
+  for (const theme of expectedThemes) {
+    assert.ok(types.includes(`"${theme}"`), `thème serveur absent : ${theme}`);
+    assert.ok(dashboard.includes(`"${theme}"`), `thème interface absent : ${theme}`);
+  }
+  assert.match(dashboard, /\{ name: "IA", icon: "[^"]+", color: "(?:red|amber|blue|violet|cyan)" \}/);
+});
+
 test("la route publique de veille est strictement en lecture", async () => {
   const route = await read("app/api/veille/route.ts");
   assert.match(route, /readLatestItems/);
