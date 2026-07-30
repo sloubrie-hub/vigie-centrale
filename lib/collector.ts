@@ -1,4 +1,5 @@
 import { archiveItems, finishCollectionRun, recordSourceRun, registerSources, startCollectionRun } from "@/lib/collection-store";
+import { aiSourceDefinitions, aiSources, collectAiSource } from "@/lib/ai-sources";
 import { executeCollectorTasks, type CollectorTask } from "@/lib/collector-runner";
 import { deriveCollectionStatus, summarizeSourceResults } from "@/lib/collection-status";
 import { CollectorDiagnosticError, requestJson, requestText } from "@/lib/http-client";
@@ -108,6 +109,7 @@ export const sourceDefinitions: SourceDefinition[] = [
   ...youtubeChannels.map((channel) => ({ id: channel.id, name: `YouTube — ${channel.creator}`, theme: channel.theme, connectorType: "youtube" as const, active: true })),
   { id: "france-travail", name: "France Travail", theme: "Emploi", connectorType: "france_travail", active: true },
   { id: "legifrance-piste", name: "Légifrance PISTE", theme: "CIP & réglementation", connectorType: "api", active: false },
+  ...aiSourceDefinitions(),
 ];
 
 function createTasks(): CollectorTask[] {
@@ -124,6 +126,10 @@ function createTasks(): CollectorTask[] {
       run: async () => parseYoutubeFeed((await requestText(`https://www.youtube.com/feeds/videos.xml?channel_id=${channel.channelId}`, { label: `YouTube ${channel.creator}`, headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, channel.creator, channel.theme, 2),
     })),
     { source: get("france-travail"), run: franceTravail },
+    ...aiSources.map((source) => ({
+      source: get(source.id),
+      run: async () => collectAiSource(source, (await requestText(source.endpoint, { label: source.name, headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text),
+    })),
   ];
 }
 
