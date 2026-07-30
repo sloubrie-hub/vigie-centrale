@@ -1,4 +1,4 @@
-export type WatchTheme = "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets";
+export type WatchTheme = "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets" | "IA";
 
 export type WatchItem = {
   id: string;

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Theme = "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets";
+type Theme = "Diablo 4" | "Hearthstone" | "Emploi" | "CIP & réglementation" | "Tech & gadgets" | "IA";
 type DataKind = "live";
 type CollectionStatus = "running" | "completed" | "partial" | "failed";
 type HealthStatus = "healthy" | "degraded" | "error" | "inactive";
@@ -27,6 +27,7 @@ const themes: { name: Theme; icon: string; color: string }[] = [
   { name: "Emploi", icon: "◎", color: "blue" },
   { name: "CIP & réglementation", icon: "§", color: "violet" },
   { name: "Tech & gadgets", icon: "⌁", color: "cyan" },
+  { name: "IA", icon: "◈", color: "violet" },
 ];
 
 const labels: Record<DataKind, string> = { live: "Donnée live" };
