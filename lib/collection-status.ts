@@ -10,3 +10,14 @@ export function summarizeSourceResults(results: { ok: boolean; journaled: boolea
   const succeeded = results.filter((result) => result.ok && result.journaled).length;
   return { succeeded, failed: results.length - succeeded };
 }
+
+export function summarizeCollectionMetrics(
+  results: { itemsCollected: number; itemsPublished: number }[],
+  itemsStored: number,
+) {
+  return {
+    itemsCollected: results.reduce((total, result) => total + result.itemsCollected, 0),
+    itemsPublished: results.reduce((total, result) => total + result.itemsPublished, 0),
+    itemsStored,
+  };
+}

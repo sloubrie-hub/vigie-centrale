@@ -14,6 +14,7 @@ export type SourceRunObservation = {
   startedAt: string;
   finishedAt: string;
   itemsCollected: number;
+  itemsPublished: number;
   durationMs: number;
   errorMessage: string | null;
 };

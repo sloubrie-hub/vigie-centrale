@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executeCollectorTasks } from "../lib/collector-runner.ts";
+import { executeCollectorTasks, publishAll, SOURCE_TIMEOUT_MS } from "../lib/collector-runner.ts";
 import { deriveCollectionStatus, summarizeSourceResults } from "../lib/collection-status.ts";
 
 const source = (id) => ({ id, name: id, theme: "Emploi", connectorType: "api", active: true });
@@ -9,18 +9,60 @@ const item = { id: "item-1", theme: "Emploi", kind: "live", date: "2026-07-20T08
 test("une source en erreur n'empêche pas les autres de terminer", async () => {
   const journal = [];
   const results = await executeCollectorTasks([
-    { source: source("ok"), run: async () => [item] },
+    { source: source("ok"), run: async () => publishAll([item]) },
     { source: source("ko"), run: async () => { throw new Error("HTTP 500 — service indisponible"); } },
-    { source: source("vide"), run: async () => [] },
+    { source: source("vide"), run: async () => publishAll([]) },
   ], "run-1", async (entry) => { journal.push(entry); });
 
   assert.deepEqual(results.map((result) => result.ok), [true, false, true]);
-  assert.deepEqual(journal.map((entry) => [entry.sourceId, entry.status, entry.itemsCollected]), [
-    ["ok", "completed", 1], ["ko", "failed", 0], ["vide", "completed", 0],
+  assert.deepEqual(journal.map((entry) => [entry.sourceId, entry.status, entry.itemsCollected, entry.itemsPublished]), [
+    ["ok", "completed", 1, 1], ["ko", "failed", 0, 0], ["vide", "completed", 0, 0],
   ]);
   const summary = summarizeSourceResults(results);
   assert.deepEqual(summary, { succeeded: 2, failed: 1 });
   assert.equal(deriveCollectionStatus(summary.succeeded, summary.failed), "partial");
+});
+
+test("le runner distingue les volumes collectés et publiés", async () => {
+  const journal = [];
+  const results = await executeCollectorTasks([
+    { source: source("large"), run: async () => ({ items: [item, item, item], itemsCollected: 100 }) },
+    { source: source("classique"), run: async () => publishAll([item, item, item, item]) },
+  ], "run-metrics", async (entry) => { journal.push(entry); });
+  assert.deepEqual(results.map(({ itemsCollected, itemsPublished }) => [itemsCollected, itemsPublished]), [[100, 3], [4, 4]]);
+  assert.deepEqual(journal.map(({ itemsCollected, itemsPublished }) => [itemsCollected, itemsPublished]), [[100, 3], [4, 4]]);
+});
+
+test("les métriques négatives ou inférieures au publié font échouer la source", async () => {
+  const results = await executeCollectorTasks([
+    { source: source("negative"), run: async () => ({ items: [], itemsCollected: -1 }) },
+    { source: source("incoherent"), run: async () => ({ items: [item], itemsCollected: 0 }) },
+  ], "run-invalid-metrics", async () => {});
+  assert.deepEqual(results.map(({ ok, itemsCollected, itemsPublished }) => [ok, itemsCollected, itemsPublished]), [
+    [false, 0, 0], [false, 0, 0],
+  ]);
+  assert.ok(results.every((result) => /Métriques collecteur invalides/.test(result.errorMessage)));
+});
+
+test("le timeout par défaut reste inchangé et une tâche peut le réduire", async () => {
+  assert.equal(SOURCE_TIMEOUT_MS, 20_000);
+  const results = await executeCollectorTasks([
+    { source: source("lent"), timeoutMs: 5, run: () => new Promise(() => {}) },
+    { source: source("ok"), run: async () => publishAll([item]) },
+  ], "run-timeout", async () => {});
+  assert.equal(results[0].ok, false);
+  assert.match(results[0].errorMessage, /Timeout collecteur après 5 ms/);
+  assert.equal(results[1].ok, true);
+});
+
+test("une erreur de journalisation reste identifiable sans perdre les métriques", async () => {
+  const [result] = await executeCollectorTasks([
+    { source: source("journal-ko"), run: async () => ({ items: [item, item, item], itemsCollected: 100 }) },
+  ], "run-journal-ko", async () => { throw new Error("journal indisponible"); });
+  assert.equal(result.ok, true);
+  assert.equal(result.journaled, false);
+  assert.equal(result.itemsCollected, 100);
+  assert.equal(result.itemsPublished, 3);
 });
 
 test("toutes les sources en erreur rendent la collecte globale failed", async () => {
