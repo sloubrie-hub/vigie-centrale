@@ -86,8 +86,12 @@ test("How I AI applique la fenêtre avant le filtre puis la limite finale", () =
 
 test("les collecteurs historiques restent en place et les ajouts viennent du registre IA", async () => {
   const collector = await readFile(new URL("../lib/collector.ts", import.meta.url), "utf8");
+  const vercel = JSON.parse(await readFile(new URL("../vercel.json", import.meta.url), "utf8"));
   const historicalIds = ["blizzard-diablo-4", "blizzard-hearthstone", "rss-ministere-travail", "rss-unml", "rss-google", "rss-microsoft", "france-travail", "legifrance-piste"];
   for (const id of historicalIds) assert.ok(collector.includes(`"${id}"`), id);
   assert.match(collector, /\.\.\.aiSourceDefinitions\(\)/);
   assert.match(collector, /\.\.\.aiSources\.map/);
+  assert.match(collector, /run: async \(\) => publishAll\(collectAiSource\(source,/);
+  assert.equal(aiSourceDefinitions().length, 5);
+  assert.deepEqual(vercel.crons, [{ path: "/api/cron/archive", schedule: "15 9 * * *" }]);
 });
