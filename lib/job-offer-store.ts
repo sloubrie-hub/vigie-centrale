@@ -89,9 +89,10 @@ function validateInput(input: UpsertJobOfferFromSourceInput) {
  */
 export async function upsertJobOfferFromSource(
   input: UpsertJobOfferFromSourceInput,
+  testDatabase?: ReturnType<typeof requireDatabase>,
 ): Promise<JobOfferWithSourceRecord> {
   validateInput(input);
-  const sql = requireDatabase();
+  const sql = testDatabase ?? requireDatabase();
   const offerId = randomUUID();
   const provenanceId = randomUUID();
   const observedAt = input.observedAt ?? new Date().toISOString();
