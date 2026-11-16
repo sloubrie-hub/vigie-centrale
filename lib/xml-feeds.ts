@@ -47,6 +47,16 @@ function dateOrNow(value: string, now: () => Date) {
   return value && !Number.isNaN(Date.parse(value)) ? new Date(value).toISOString() : now().toISOString();
 }
 
+export function youtubeWatchItem(video: { id: string; title: string; date: string; url?: string }, creator: string, theme: WatchTheme): WatchItem {
+  const url = video.url || (video.id ? `https://www.youtube.com/watch?v=${video.id}` : "");
+  return {
+    id: video.id ? `youtube-${video.id}` : stableId("youtube", `${creator}|${url}`),
+    theme, kind: "live", date: video.date, title: clean(video.title) || "Nouvelle vidéo",
+    summary: `Nouvelle vidéo publiée par ${creator}.`, source: `${creator} — YouTube`, url,
+    priority: "À lire", tags: ["YouTube", "Créateur", creator],
+  };
+}
+
 export function parseRssFeed(
   xml: string,
   source: string,
@@ -84,16 +94,8 @@ export function parseYoutubeFeed(
 ): WatchItem[] {
   const document = parse(xml, "Flux YouTube");
   const entries = array(node(document.feed).entry as XmlNode | XmlNode[] | undefined).slice(0, limit);
-  return entries.map(node).map((entry) => {
-    const videoId = text(entry["yt:videoId"]);
-    const link = linkFrom(entry.link) || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : "");
-    const published = text(entry.published) || text(entry.updated);
-    return {
-      id: videoId ? `youtube-${videoId}` : stableId("youtube", `${creator}|${link}`),
-      theme, kind: "live" as const, date: dateOrNow(published, now),
-      title: clean(text(entry.title)) || "Nouvelle vidéo",
-      summary: `Nouvelle vidéo publiée par ${creator}.`, source: `${creator} — YouTube`, url: link,
-      priority: "À lire" as const, tags: ["YouTube", "Créateur", creator],
-    };
-  }).filter((item) => item.url && item.title);
+  return entries.map(node).map((entry) => youtubeWatchItem({
+    id: text(entry["yt:videoId"]), title: text(entry.title), url: linkFrom(entry.link),
+    date: dateOrNow(text(entry.published) || text(entry.updated), now),
+  }, creator, theme)).filter((item) => item.url && item.title);
 }

@@ -1,4 +1,5 @@
 import { neon } from "@neondatabase/serverless";
+import { includeHubYoutube } from "@/lib/youtube-collection";
 import type { WatchItem } from "@/lib/watch-types";
 
 const database = () => process.env.DATABASE_URL ? neon(process.env.DATABASE_URL) : null;
@@ -19,7 +20,7 @@ export async function readArchive(query = "", theme = "", limit = 300): Promise<
     ORDER BY published_at DESC
     LIMIT ${safeLimit}
   `;
-  return rows.map((row) => ({
+  const items: ArchivedItem[] = rows.map((row) => ({
     id: String(row.source_id), theme: String(row.theme) as WatchItem["theme"], kind: "live",
     date: new Date(String(row.published_at)).toISOString(), title: String(row.title),
     summary: String(row.summary), source: String(row.source), url: String(row.url),
@@ -27,4 +28,5 @@ export async function readArchive(query = "", theme = "", limit = 300): Promise<
     tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
     archivedAt: new Date(String(row.first_seen_at)).toISOString(),
   }));
+  return includeHubYoutube(items, safeLimit, { theme, query, history: true });
 }
