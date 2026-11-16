@@ -31,6 +31,7 @@ export type HttpRequestOptions = RequestInit & {
   maxRetries?: number;
   acceptedContentTypes?: string[];
   fetchImpl?: FetchImplementation;
+  onResponse?: (response: Pick<Response, "status" | "headers">) => void;
   sleep?: (durationMs: number) => Promise<void>;
 };
 
@@ -106,6 +107,7 @@ export async function requestText(url: string, options: HttpRequestOptions): Pro
     maxRetries = MAX_RETRIES,
     acceptedContentTypes,
     fetchImpl = fetch,
+    onResponse,
     sleep = wait,
     ...init
   } = options;
@@ -116,6 +118,7 @@ export async function requestText(url: string, options: HttpRequestOptions): Pro
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetchImpl(url, { ...init, signal: controller.signal });
+      onResponse?.(response);
       if (!response.ok) throw httpError(label, response);
       const contentType = response.headers.get("content-type")?.toLowerCase();
       if (contentType && acceptedContentTypes && !acceptedContentTypes.some((type) => contentType.includes(type))) {

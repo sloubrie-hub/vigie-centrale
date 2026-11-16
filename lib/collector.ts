@@ -49,7 +49,11 @@ async function blizzard(product: "diablo-4" | "hearthstone", theme: WatchTheme):
   }).filter((item) => item.url && item.title);
 }
 
-async function franceTravail(): Promise<CollectorOutput> {
+export type FranceTravailPage = {
+  territory: string; range: string | null; status: number | null; contentRange: string | null; rows: number | null;
+};
+
+export async function readFranceTravailOffers(onPage?: (page: FranceTravailPage) => void) {
   const clientId = process.env.FRANCE_TRAVAIL_CLIENT_ID;
   const clientSecret = process.env.FRANCE_TRAVAIL_CLIENT_SECRET;
   if (!clientId || !clientSecret) throw new Error("Identifiants OAuth France Travail requis");
@@ -64,16 +68,34 @@ async function franceTravail(): Promise<CollectorOutput> {
   }
   const searches = createFranceTravailSearches();
   const payloads = await Promise.all(searches.map(async (search) => ({
-    resultats: await collectFranceTravailSearch(search, (params) => requestJson<{ resultats?: unknown }>(
-      `https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`,
-      {
-        label: `API France Travail (${params.get("range")})`,
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-        allowEmpty: true,
-      },
-    )),
+    resultats: await collectFranceTravailSearch(search, async (params) => {
+      const page: FranceTravailPage = {
+        territory: search.has("departement") ? "departement-47" : "commune-47277-30km",
+        range: params.get("range"), status: null, contentRange: null, rows: null,
+      };
+      try {
+        const payload = await requestJson<{ resultats?: unknown }>(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, {
+          label: `API France Travail (${params.get("range")})`,
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+          allowEmpty: true,
+          onResponse: onPage ? (response) => {
+            page.status = response.status;
+            page.contentRange = response.headers.get("content-range");
+          } : undefined,
+        });
+        page.rows = Array.isArray(payload?.resultats) ? payload.resultats.length : payload === null ? 0 : null;
+        return payload;
+      } finally {
+        onPage?.(page);
+      }
+    }),
   })));
   const uniqueOffers = deduplicateFranceTravailOffers(payloads);
+  return uniqueOffers;
+}
+
+async function franceTravail(): Promise<CollectorOutput> {
+  const uniqueOffers = await readFranceTravailOffers();
   const checkedAt = new Date().toISOString();
   await persistFranceTravailOffers(uniqueOffers, checkedAt, upsertJobOfferFromSource);
   const items = uniqueOffers.map((offer) => ({
