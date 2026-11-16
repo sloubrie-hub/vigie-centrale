@@ -10,7 +10,7 @@ const branch = "codex/recette-pagination-ft-20261116";
 const marker = "vigie-p12-20261116-schema-seul";
 const first = "2026-11-16T09:00:00Z";
 const second = "2026-11-16T10:00:00Z";
-const responseHeaders = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
+const responseHeaders = { "Cache-Control": "no-store", "Referrer-Policy": "same-origin" };
 const fixtureId = (index: number) => `vigie-p12-fixture-${index + 1}`;
 
 function isRecipePreview() {
@@ -29,8 +29,10 @@ export function GET() {
 
 export async function POST(request: Request) {
   if (!isRecipePreview()) return new Response(null, { status: 404 });
-  if (new URL(request.url).origin !== request.headers.get("origin")) {
-    return new Response(null, { status: 403 });
+  const origin = request.headers.get("origin");
+  const sameSite = origin === new URL(request.url).origin || origin === `https://${process.env.VERCEL_URL}`;
+  if (request.headers.get("sec-fetch-site") !== "same-origin" || !sameSite) {
+    return Response.json({ status: "origin_denied" }, { status: 403, headers: responseHeaders });
   }
   const connection = process.env.P12_RECIPE_DATABASE_URL;
   const action = (await request.formData()).get("action");
