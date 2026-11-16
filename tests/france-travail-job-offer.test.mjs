@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  collectFranceTravailSearch,
   createFranceTravailSearches,
   deduplicateFranceTravailOffers,
   persistFranceTravailOffers,
-  selectRelevantFranceTravailOffers,
   toJobOfferUpsertInput,
 } from "../lib/france-travail-job-offer.ts";
 
@@ -103,52 +103,101 @@ test("le raw payload exclut récursivement OAuth, headers et secrets", () => {
 
 test("les deux recherches géographiques restent strictement bornées", () => {
   const [department, radius] = createFranceTravailSearches();
-  assert.deepEqual(Object.fromEntries(department), { departement: "47", range: "0-149", sort: "1" });
-  assert.deepEqual(Object.fromEntries(radius), { commune: "47277", distance: "30", range: "0-149", sort: "1" });
+  assert.equal(createFranceTravailSearches().length, 2);
+  assert.deepEqual(Object.fromEntries(department), { departement: "47", sort: "1" });
+  assert.deepEqual(Object.fromEntries(radius), { commune: "47277", distance: "30", sort: "1" });
   const serialized = createFranceTravailSearches().map(String).join("&");
   assert.doesNotMatch(serialized, /33227|distance=45/);
 });
 
-test("toutes les offres uniques sont persistées, puis seules 20 offres pertinentes sont publiées", async () => {
-  const relevant = Array.from({ length: 22 }, (_, index) => ({
-    id: `REL-${index}`,
-    intitule: `Conseiller emploi ${index}`,
-  }));
-  const duplicate = { ...relevant[0], description: "Version du second périmètre" };
-  const irrelevant = { id: "OTHER", intitule: "Développeur web" };
+test("les offres de tous métiers sont conservées et dédupliquées entre territoires", async () => {
+  const offers = [
+    { id: "CIP", intitule: "Conseiller en insertion professionnelle" },
+    { id: "COMMERCE", intitule: "Vendeur en magasin" },
+    { id: "INDUSTRIE", intitule: "Opérateur de production" },
+    { id: "SERVICE", intitule: "Agent de nettoyage" },
+  ];
+  const duplicate = { ...offers[0], description: "Version du second périmètre" };
   const unique = deduplicateFranceTravailOffers([
-    { resultats: [...relevant, irrelevant] },
+    { resultats: offers },
     { resultats: [duplicate] },
   ]);
-  const selected = selectRelevantFranceTravailOffers(unique);
   const persisted = [];
   await persistFranceTravailOffers(unique, observedAt, async (input) => {
     persisted.push(input);
     return { offer: { id: input.source.externalId }, source: {} };
   });
-  assert.equal(selected.length, 20);
-  assert.equal(unique.length, 23);
-  assert.equal(persisted.length, 23);
-  assert.equal(new Set(persisted.map((input) => input.source.externalId)).size, 23);
-  assert.equal(persisted.some((input) => input.source.externalId === "OTHER"), true);
-  assert.equal(selected.some((offer) => offer.id === "OTHER"), false);
+  assert.deepEqual(unique.map((offer) => offer.id), ["CIP", "COMMERCE", "INDUSTRIE", "SERVICE"]);
+  assert.equal(persisted.length, 4);
+  assert.equal(new Set(persisted.map((input) => input.source.externalId)).size, 4);
   assert.equal(persisted.every((input) => input.observedAt === observedAt), true);
 });
 
-test("250 offres non-CIP sont toutes structurées sans produire de carte Emploi", async () => {
-  const payloads = [
-    { resultats: Array.from({ length: 150 }, (_, index) => ({ id: `A-${index}`, intitule: `Métier technique ${index}` })) },
-    { resultats: Array.from({ length: 100 }, (_, index) => ({ id: `B-${index}`, intitule: `Métier commercial ${index}` })) },
-  ];
-  const unique = deduplicateFranceTravailOffers(payloads);
-  const persisted = [];
-  await persistFranceTravailOffers(unique, observedAt, async (input) => {
-    persisted.push(input.source.externalId);
-    return { offer: {}, source: {} };
+test("une page complète appelle la suivante, puis une page partielle arrête sans requête inutile", async () => {
+  const ranges = [];
+  const offers = await collectFranceTravailSearch(
+    new URLSearchParams({ departement: "47", sort: "1" }),
+    async (params) => {
+      ranges.push(params.get("range"));
+      return ranges.length === 1
+        ? { resultats: Array.from({ length: 3 }, (_, index) => ({ id: `PAGE-1-${index}`, intitule: `Métier ${index}` })) }
+        : { resultats: [{ id: "PAGE-2", intitule: "Autre métier" }] };
+    },
+    { pageSize: 3, maxPages: 5 },
+  );
+  assert.deepEqual(ranges, ["0-2", "3-5"]);
+  assert.equal(offers.length, 4);
+});
+
+test("une réponse vide arrête la pagination", async () => {
+  let calls = 0;
+  const offers = await collectFranceTravailSearch(new URLSearchParams({ departement: "47" }), async () => {
+    calls += 1;
+    return { resultats: [] };
   });
-  assert.equal(unique.length, 250);
-  assert.equal(persisted.length, 250);
-  assert.deepEqual(selectRelevantFranceTravailOffers(unique), []);
+  assert.equal(calls, 1);
+  assert.deepEqual(offers, []);
+});
+
+test("une offre présente sur deux pages n'est collectée qu'une fois", async () => {
+  let page = 0;
+  const offers = await collectFranceTravailSearch(new URLSearchParams({ departement: "47" }), async () => {
+    page += 1;
+    return page === 1
+      ? { resultats: [{ id: "DUP", intitule: "Métier A" }, { id: "UNIQUE", intitule: "Métier B" }] }
+      : { resultats: [{ id: "DUP", intitule: "Métier A actualisé" }] };
+  }, { pageSize: 2, maxPages: 3 });
+  assert.deepEqual(offers.map((offer) => offer.id), ["DUP", "UNIQUE"]);
+});
+
+test("la limite de sécurité arrête une pagination toujours pleine", async () => {
+  let calls = 0;
+  await assert.rejects(
+    collectFranceTravailSearch(new URLSearchParams({ departement: "47" }), async () => {
+      calls += 1;
+      return { resultats: [{ id: `A-${calls}`, intitule: "Métier A" }] };
+    }, { pageSize: 1, maxPages: 2 }),
+    /limite de sécurité atteinte après 2 pages/,
+  );
+  assert.equal(calls, 2);
+});
+
+test("une réponse paginée invalide produit un diagnostic explicite", async () => {
+  await assert.rejects(
+    collectFranceTravailSearch(new URLSearchParams({ departement: "47" }), async () => ({ resultats: "invalide" })),
+    /réponse invalide.*0-149/,
+  );
+  await assert.rejects(
+    collectFranceTravailSearch(
+      new URLSearchParams({ departement: "47" }),
+      async () => ({ resultats: [
+        { id: "A", intitule: "Métier A" },
+        { id: "B", intitule: "Métier B" },
+      ] }),
+      { pageSize: 1, maxPages: 2 },
+    ),
+    /2 résultats pour une plage de 1/,
+  );
 });
 
 test("tous les upserts sont attendus avant un échec de persistance aseptisé", async () => {
@@ -172,13 +221,15 @@ test("tous les upserts sont attendus avant un échec de persistance aseptisé", 
   assert.equal(attempts, offers.length);
 });
 
-test("le collecteur persiste tout le marché avant le filtre historique inchangé", async () => {
+test("le collecteur publie et persiste exactement le même ensemble territorial unique", async () => {
   const collector = await read("lib/collector.ts");
+  const adapter = await read("lib/france-travail-job-offer.ts");
+  assert.match(collector, /collectFranceTravailSearch\(search/);
   assert.match(collector, /const uniqueOffers = deduplicateFranceTravailOffers\(payloads\)/);
   assert.match(collector, /await persistFranceTravailOffers\(uniqueOffers, checkedAt, upsertJobOfferFromSource\)/);
-  assert.match(collector, /const relevant = selectRelevantFranceTravailOffers\(uniqueOffers\)/);
-  assert.ok(collector.indexOf("persistFranceTravailOffers(uniqueOffers") < collector.indexOf("selectRelevantFranceTravailOffers(uniqueOffers"));
+  assert.match(collector, /const items = uniqueOffers\.map/);
   assert.match(collector, /return \{ items, itemsCollected: uniqueOffers\.length \}/);
+  assert.doesNotMatch(`${collector}\n${adapter}`, /RELEVANT_JOB_PATTERN|selectRelevantFranceTravailOffers|\.slice\(0, 20\)/);
   assert.match(collector, /const FRANCE_TRAVAIL_TIMEOUT_MS = 120_000/);
   assert.match(collector, /source: get\("france-travail"\), run: franceTravail, timeoutMs: FRANCE_TRAVAIL_TIMEOUT_MS/);
   assert.match(collector, /id: `ft-\$\{offer\.id\}`/);

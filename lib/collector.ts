@@ -4,12 +4,11 @@ import { executeCollectorTasks, publishAll, type CollectorOutput, type Collector
 import { deriveCollectionStatus, summarizeCollectionMetrics, summarizeSourceResults } from "@/lib/collection-status";
 import { CollectorDiagnosticError, requestJson, requestText } from "@/lib/http-client";
 import {
+  collectFranceTravailSearch,
   createFranceTravailSearches,
   deduplicateFranceTravailOffers,
   franceTravailOfferUrl,
   persistFranceTravailOffers,
-  selectRelevantFranceTravailOffers,
-  type FranceTravailOffer,
 } from "@/lib/france-travail-job-offer";
 import { upsertJobOfferFromSource } from "@/lib/job-offer-store";
 import { parseRssFeed } from "@/lib/xml-feeds";
@@ -65,26 +64,20 @@ async function franceTravail(): Promise<CollectorOutput> {
     throw new CollectorDiagnosticError("OAuth France Travail : jeton absent ou invalide", "invalid_response");
   }
   const searches = createFranceTravailSearches();
-  const payloads = await Promise.all(searches.map(async (params) => {
-    const payload = await requestJson<{ resultats?: unknown }>(`https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`, {
-      label: "API France Travail",
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      allowEmpty: true,
-    });
-    if (payload === null) return { resultats: [] as FranceTravailOffer[] };
-    if (!Array.isArray(payload.resultats)) {
-      throw new CollectorDiagnosticError("API France Travail : réponse JSON inattendue", "invalid_response");
-    }
-    const invalidOffer = payload.resultats.some((offer) => !offer || typeof offer !== "object"
-      || typeof (offer as FranceTravailOffer).id !== "string" || typeof (offer as FranceTravailOffer).intitule !== "string");
-    if (invalidOffer) throw new CollectorDiagnosticError("API France Travail : offre invalide dans la réponse", "invalid_response");
-    return { resultats: payload.resultats as FranceTravailOffer[] };
-  }));
+  const payloads = await Promise.all(searches.map(async (search) => ({
+    resultats: await collectFranceTravailSearch(search, (params) => requestJson<{ resultats?: unknown }>(
+      `https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search?${params}`,
+      {
+        label: `API France Travail (${params.get("range")})`,
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        allowEmpty: true,
+      },
+    )),
+  })));
   const uniqueOffers = deduplicateFranceTravailOffers(payloads);
   const checkedAt = new Date().toISOString();
   await persistFranceTravailOffers(uniqueOffers, checkedAt, upsertJobOfferFromSource);
-  const relevant = selectRelevantFranceTravailOffers(uniqueOffers);
-  const items = relevant.map((offer) => ({
+  const items = uniqueOffers.map((offer) => ({
     id: `ft-${offer.id}`, theme: "Emploi" as const, kind: "live" as const, date: offer.dateCreation || checkedAt,
     title: offer.intitule, summary: clean(offer.description).slice(0, 280), source: "France Travail — API officielle",
     url: franceTravailOfferUrl(offer),

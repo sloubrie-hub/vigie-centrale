@@ -31,13 +31,14 @@ export type JobOfferUpsert = (
   input: UpsertJobOfferFromSourceInput,
 ) => Promise<JobOfferWithSourceRecord>;
 
-const RELEVANT_JOB_PATTERN = /insertion|conseiller.*emploi|accompagnement.*professionnel|référent.*insertion|chargé.*insertion|mission locale|formateur.*insertion|éducateur.*spécialisé|orientation professionnelle/i;
 const SENSITIVE_RAW_KEY = /^(?:access_?token|authorization|client_?id|client_?secret|headers?|oauth)$/i;
+export const FRANCE_TRAVAIL_PAGE_SIZE = 150;
+export const FRANCE_TRAVAIL_MAX_PAGES = 20;
 
 export function createFranceTravailSearches(): URLSearchParams[] {
   return [
-    new URLSearchParams({ departement: "47", range: "0-149", sort: "1" }),
-    new URLSearchParams({ commune: "47277", distance: "30", range: "0-149", sort: "1" }),
+    new URLSearchParams({ departement: "47", sort: "1" }),
+    new URLSearchParams({ commune: "47277", distance: "30", sort: "1" }),
   ];
 }
 
@@ -46,18 +47,54 @@ export function franceTravailOfferUrl(offer: FranceTravailOffer): string {
     || `https://candidat.francetravail.fr/offres/recherche/detail/${offer.id}`;
 }
 
-export function selectRelevantFranceTravailOffers(
-  offers: FranceTravailOffer[],
-): FranceTravailOffer[] {
-  return offers.filter((offer) => RELEVANT_JOB_PATTERN.test(offer.intitule)).slice(0, 20);
-}
-
 export function deduplicateFranceTravailOffers(
   payloads: Array<{ resultats: FranceTravailOffer[] }>,
 ): FranceTravailOffer[] {
   return [...new Map(
     payloads.flatMap((data) => data.resultats).map((offer) => [offer.id, offer]),
   ).values()];
+}
+
+type FranceTravailPageFetcher = (
+  params: URLSearchParams,
+) => Promise<{ resultats?: unknown } | null>;
+
+export async function collectFranceTravailSearch(
+  search: URLSearchParams,
+  fetchPage: FranceTravailPageFetcher,
+  { pageSize = FRANCE_TRAVAIL_PAGE_SIZE, maxPages = FRANCE_TRAVAIL_MAX_PAGES } = {},
+): Promise<FranceTravailOffer[]> {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || !Number.isInteger(maxPages) || maxPages < 1) {
+    throw new Error("Pagination France Travail : configuration invalide");
+  }
+
+  const offers: FranceTravailOffer[] = [];
+  for (let page = 0; page < maxPages; page += 1) {
+    const start = page * pageSize;
+    const params = new URLSearchParams(search);
+    params.set("range", `${start}-${start + pageSize - 1}`);
+    const payload = await fetchPage(params);
+    if (payload === null) return deduplicateFranceTravailOffers([{ resultats: offers }]);
+    if (!Array.isArray(payload.resultats)) {
+      throw new Error(`Pagination France Travail : réponse invalide pour la plage ${params.get("range")}`);
+    }
+    if (payload.resultats.length > pageSize) {
+      throw new Error(`Pagination France Travail : ${payload.resultats.length} résultats pour une plage de ${pageSize}`);
+    }
+    const invalidOffer = payload.resultats.some((offer) => !offer || typeof offer !== "object"
+      || typeof (offer as FranceTravailOffer).id !== "string"
+      || typeof (offer as FranceTravailOffer).intitule !== "string");
+    if (invalidOffer) {
+      throw new Error(`Pagination France Travail : offre invalide pour la plage ${params.get("range")}`);
+    }
+
+    offers.push(...payload.resultats as FranceTravailOffer[]);
+    if (payload.resultats.length < pageSize) {
+      return deduplicateFranceTravailOffers([{ resultats: offers }]);
+    }
+  }
+
+  throw new Error(`Pagination France Travail : limite de sécurité atteinte après ${maxPages} pages`);
 }
 
 function optionalText(value: unknown): string | null {
