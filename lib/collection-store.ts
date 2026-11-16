@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { archiveItemsWithStore } from "@/lib/archive-identity";
+import { includeHubYoutube } from "@/lib/youtube-collection";
 import { assessDataReliability, calculateSourceHealth, HEALTH_WINDOW_SIZE, type SourceRunObservation } from "@/lib/source-health";
 import type { CollectionStatus, CollectionSummary, ReliabilitySummary, SourceDefinition, SourceHealth, SourceRunStatus, WatchItem } from "@/lib/watch-types";
 
@@ -99,7 +100,7 @@ export async function readLatestItems(limit = 300): Promise<WatchItem[]> {
   const safeLimit = Math.max(1, Math.min(limit, 500));
   const rows = await sql`SELECT source_id, theme, published_at, title, summary, source, url,
     priority, tags, first_seen_at FROM watch_archive ORDER BY published_at DESC LIMIT ${safeLimit}`;
-  return rows.map((row) => ({
+  const items: WatchItem[] = rows.map((row) => ({
     id: String(row.source_id), theme: String(row.theme) as WatchItem["theme"], kind: "live",
     date: new Date(String(row.published_at)).toISOString(), title: String(row.title),
     summary: String(row.summary), source: String(row.source), url: String(row.url),
@@ -107,6 +108,7 @@ export async function readLatestItems(limit = 300): Promise<WatchItem[]> {
     tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
     archivedAt: new Date(String(row.first_seen_at)).toISOString(),
   }));
+  return includeHubYoutube(items, safeLimit);
 }
 
 export async function readCollectionState(): Promise<{ collection: CollectionSummary; sources: SourceHealth[]; reliability: ReliabilitySummary }> {

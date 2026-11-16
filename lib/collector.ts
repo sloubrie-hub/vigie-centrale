@@ -12,7 +12,8 @@ import {
   type FranceTravailOffer,
 } from "@/lib/france-travail-job-offer";
 import { upsertJobOfferFromSource } from "@/lib/job-offer-store";
-import { parseRssFeed, parseYoutubeFeed } from "@/lib/xml-feeds";
+import { parseRssFeed } from "@/lib/xml-feeds";
+import { createYoutubeTasks, youtubeChannels } from "@/lib/youtube-collection";
 import type { SourceDefinition, WatchItem, WatchTheme } from "@/lib/watch-types";
 
 type BlizzardEntry = { contentId: string; properties?: { title?: string; category?: string; summary?: string; lastUpdated?: string; publishDate?: string; newsUrl?: string } };
@@ -93,16 +94,6 @@ async function franceTravail(): Promise<CollectorOutput> {
   return { items, itemsCollected: uniqueOffers.length };
 }
 
-const youtubeChannels = [
-  { id: "youtube-mathrais", creator: "Mathrais", channelId: "UCkhScOO1FChfqWbE8eR-ZSA", theme: "Hearthstone" as const },
-  { id: "youtube-oliech", creator: "Oliech", channelId: "UCTdicWbtwYfLyZ7S1M9XuIQ", theme: "Hearthstone" as const },
-  { id: "youtube-shadybunny", creator: "Shadybunny", channelId: "UCb1UDLJOk4n7qZa-Y0z7Yig", theme: "Hearthstone" as const },
-  { id: "youtube-jeef", creator: "Jeef", channelId: "UCK3rJ7OXrXZIcnw-xYrSXOg", theme: "Hearthstone" as const },
-  { id: "youtube-cliptis", creator: "Cliptis", channelId: "UCTNiHLvyyV1r4-OLb8xaL5g", theme: "Diablo 4" as const },
-  { id: "youtube-rob2628", creator: "Rob2628", channelId: "UCLxdlfnTN3G02ekxOwoIzYw", theme: "Diablo 4" as const },
-  { id: "youtube-wudijo", creator: "wudijo", channelId: "UCXApYvw59S9MypwdXb1Pe_w", theme: "Diablo 4" as const },
-];
-
 export const sourceDefinitions: SourceDefinition[] = [
   { id: "blizzard-diablo-4", name: "Blizzard Diablo IV", theme: "Diablo 4", connectorType: "blizzard", active: true },
   { id: "blizzard-hearthstone", name: "Blizzard Hearthstone", theme: "Hearthstone", connectorType: "blizzard", active: true },
@@ -125,10 +116,7 @@ function createTasks(): CollectorTask[] {
     { source: get("rss-unml"), run: async () => publishAll(parseRssFeed((await requestText("https://www.unml.info/feed/", { label: "RSS UNML", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "UNML", "CIP & réglementation", ["Mission Locale", "Réseau"], 5)) },
     { source: get("rss-google"), run: async () => publishAll(parseRssFeed((await requestText("https://blog.google/rss/", { label: "RSS Google", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Google — blog officiel", "Tech & gadgets", ["Google", "Produit"], 4)) },
     { source: get("rss-microsoft"), run: async () => publishAll(parseRssFeed((await requestText("https://blogs.microsoft.com/feed/", { label: "RSS Microsoft", headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, "Microsoft — blog officiel", "Tech & gadgets", ["Microsoft", "Produit"], 4)) },
-    ...youtubeChannels.map((channel) => ({
-      source: get(channel.id),
-      run: async () => publishAll(parseYoutubeFeed((await requestText(`https://www.youtube.com/feeds/videos.xml?channel_id=${channel.channelId}`, { label: `YouTube ${channel.creator}`, headers: { "User-Agent": "Vigie-Centrale/1.0" } })).text, channel.creator, channel.theme, 2)),
-    })),
+    ...createYoutubeTasks(get),
     { source: get("france-travail"), run: franceTravail, timeoutMs: FRANCE_TRAVAIL_TIMEOUT_MS },
     ...aiSources.map((source) => ({
       source: get(source.id),
