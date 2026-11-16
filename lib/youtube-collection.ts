@@ -1,7 +1,8 @@
 import { verify as verifySignature } from "node:crypto";
+import { getCache } from "@vercel/functions";
 import { extractYoutubeVideoId } from "./archive-identity.ts";
 import { publishAll, type CollectorTask } from "./collector-runner.ts";
-import { requestJson, requestText, safeDiagnostic } from "./http-client.ts";
+import { requestText, safeDiagnostic } from "./http-client.ts";
 import type { SourceDefinition, WatchItem } from "./watch-types.ts";
 import { parseYoutubeFeed, youtubeWatchItem } from "./xml-feeds.ts";
 
@@ -18,10 +19,12 @@ export const youtubeChannels = [
 const hearthstone = new Map(youtubeChannels.filter(({ theme }) => theme === "Hearthstone").map((channel) => [channel.channelId, channel]));
 const maxRunAge = 12 * 60 * 60 * 1000;
 const cardsPerChannel = 2;
+const parisDay = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris" });
 
 type YoutubeChannel = (typeof youtubeChannels)[number];
 type HubVideo = { id: string; channel_id: string; title: string; published_at: string; expires_at: string; checked_in_run: 0 | 1 };
 type HubBatch = { run_id: string | null; finished_at: string | null; items: HubVideo[] };
+type HubExport = HubBatch & { run_id: string; finished_at: string; delivery?: "nightly" };
 
 function unpackHubBatch(batch: HubBatch | null) {
   if (!batch || !Array.isArray(batch.items) || batch.items.length > 240 || batch.items.some((video) =>
@@ -31,7 +34,7 @@ function unpackHubBatch(batch: HubBatch | null) {
   return { ...batch, items: batch.items.filter(({ expires_at }) => Date.parse(expires_at) > Date.now()) };
 }
 
-export function verifyHubYoutubeExport(envelope: unknown) {
+export function verifyHubYoutubeExport(envelope: unknown): HubExport | null {
   const publicKey = process.env.VIGIE_HUB_EXPORT_PUBLIC_KEY;
   if (!publicKey || !envelope || typeof envelope !== "object") return null;
   const { payload, signature } = envelope as { payload?: unknown; signature?: unknown };
@@ -40,11 +43,47 @@ export function verifyHubYoutubeExport(envelope: unknown) {
   try {
     const key = { key: Buffer.from(publicKey, "base64"), format: "der" as const, type: "spki" as const };
     if (!verifySignature(null, Buffer.from(payload), key, Buffer.from(signature, "base64"))) return null;
-    const lot = JSON.parse(payload) as HubBatch & { purpose?: string };
+    const lot = JSON.parse(payload) as HubBatch & { purpose?: string; delivery?: string };
     if (lot?.purpose !== "vigie-youtube-v1" || typeof lot.run_id !== "string" ||
       !/^[A-Za-z0-9-]{1,100}$/.test(lot.run_id) || typeof lot.finished_at !== "string") return null;
     const age = Date.now() - Date.parse(lot.finished_at);
-    return age >= 0 && age <= maxRunAge ? unpackHubBatch(lot) : null;
+    if (!(age >= 0 && age <= maxRunAge) || parisDay.format(new Date(lot.finished_at)) !== parisDay.format(new Date())) return null;
+    const valid = unpackHubBatch(lot);
+    return valid ? { items: valid.items, run_id: lot.run_id, finished_at: lot.finished_at,
+      delivery: lot.delivery === "nightly" ? "nightly" : undefined } : null;
+  } catch {
+    return null;
+  }
+}
+
+function hubCacheKey(date = new Date()) {
+  return `vigie-hub-youtube-v1:${process.env.VERCEL_ENV ?? "local"}:${parisDay.format(date)}`;
+}
+
+export async function cacheHubYoutubeExport(envelope: unknown, requireNightly = false) {
+  const lot = verifyHubYoutubeExport(envelope);
+  if (!lot || (requireNightly && lot.delivery !== "nightly")) return null;
+  const expiresAt = Date.parse(lot.finished_at) + maxRunAge;
+  const ttl = Math.floor((expiresAt - Date.now()) / 1000);
+  if (ttl <= 0) return null;
+  const cache = getCache();
+  const key = hubCacheKey(new Date(lot.finished_at));
+  const current = verifyHubYoutubeExport(await cache.get(key));
+  if (current && Date.parse(current.finished_at) >= Date.parse(lot.finished_at)) {
+    return current.run_id === lot.run_id ? current : null;
+  }
+  await cache.set(key, envelope, { ttl });
+  return lot;
+}
+
+export async function readHubYoutubeEnvelope(request: Request): Promise<unknown> {
+  if (Number(request.headers.get("content-length")) > 512 * 1024) return null;
+  try {
+    const text = await request.text();
+    if (Buffer.byteLength(text) > 512 * 1024) return null;
+    const body = request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")
+      ? new URLSearchParams(text).get("export") : text;
+    return body ? JSON.parse(body) : null;
   } catch {
     return null;
   }
@@ -57,16 +96,10 @@ function hubEndpoint() {
 }
 
 async function readHubYoutube(): Promise<HubBatch | null> {
-  const endpoint = hubEndpoint();
-  const sitesToken = process.env.VIGIE_HUB_SITES_TOKEN;
-  const readProof = process.env.VIGIE_HUB_READ_PROOF;
-  if (!endpoint || !sitesToken || !readProof || !/^[a-f0-9]{64}$/.test(readProof)) return null;
+  if (!process.env.VIGIE_HUB_EXPORT_PUBLIC_KEY) return null;
   try {
-    const batch = await requestJson<HubBatch>(endpoint, {
-      label: "Lot YouTube du Hub", redirect: "error", cache: "no-store", timeoutMs: 2500, maxRetries: 0, maxResponseBytes: 256 * 1024,
-      headers: { Accept: "application/json", "OAI-Sites-Authorization": `Bearer ${sitesToken}`, "X-BSH-Vigie": readProof },
-    });
-    return unpackHubBatch(batch);
+    const lot = verifyHubYoutubeExport(await getCache().get(hubCacheKey()));
+    return process.env.VERCEL_ENV === "production" && lot?.delivery !== "nightly" ? null : lot;
   } catch {
     return null;
   }
@@ -88,30 +121,56 @@ async function readYoutubeAtom(channel: YoutubeChannel) {
   return parseYoutubeFeed(text, channel.creator, channel.theme, cardsPerChannel);
 }
 
+function compareYoutubeCoverage(batch: HubBatch | null, channel: YoutubeChannel, atom: WatchItem[]) {
+  const candidate = coveredVideos(batch, channel.channelId);
+  const candidateIds = new Set(candidate.map(({ id }) => id));
+  const atomIds = new Set(atom.map(({ url }) => extractYoutubeVideoId(url)));
+  const finishedAt = batch?.finished_at ? Date.parse(batch.finished_at) : NaN;
+  return {
+    source: channel.id,
+    hubCount: candidate.length,
+    atomCount: atom.length,
+    equivalent: batch && atom.length === cardsPerChannel
+      ? candidateIds.size === cardsPerChannel && atomIds.size === cardsPerChannel &&
+        [...atomIds].every((id) => id !== null && candidateIds.has(id))
+      : null,
+    publishedAfterHub: Number.isFinite(finishedAt)
+      ? atom.filter(({ date }) => Date.parse(date) > finishedAt).length
+      : null,
+  };
+}
+
 export function createYoutubeTasks(sourceFor: (id: string) => SourceDefinition): CollectorTask[] {
   const reuse = process.env.VIGIE_HUB_REUSE === "true";
+  const observe = process.env.VIGIE_HUB_OBSERVE === "true";
   let sharedBatch: Promise<HubBatch | null> | undefined;
   return youtubeChannels.map((channel) => ({
     source: sourceFor(channel.id),
     run: async () => {
-      if (reuse && channel.theme === "Hearthstone") {
-        const batch = await (sharedBatch ??= readHubYoutube());
+      const readsHub = channel.theme === "Hearthstone" && (reuse || observe);
+      const batch = readsHub ? await (sharedBatch ??= readHubYoutube()) : null;
+      if (reuse && !observe && batch) {
         const videos = coveredVideos(batch, channel.channelId);
-        if (batch && videos.length) {
+        if (videos.length) {
           console.info(`YouTube ${channel.creator} : passage du Hub ${batch.run_id} réutilisé.`);
           return { items: [], itemsCollected: videos.length };
         }
       }
-      return publishAll(await readYoutubeAtom(channel));
+      const items = await readYoutubeAtom(channel);
+      if (observe && readsHub) {
+        console.info(JSON.stringify({ event: "hub-youtube-coverage", runId: batch?.run_id ?? null,
+          finishedAt: batch?.finished_at ?? null, ...compareYoutubeCoverage(batch, channel, items) }));
+      }
+      return publishAll(items);
     },
   }));
 }
 
-export async function inspectHubYoutubeCoverage(verifiedExport?: HubBatch) {
+export async function inspectHubYoutubeCoverage() {
   const observedAt = new Date().toISOString();
   const endpoint = hubEndpoint();
-  const batch = verifiedExport ?? await readHubYoutube();
-  let probe = verifiedExport ? "signature vérifiée" : "authenticated";
+  const batch = await readHubYoutube();
+  let probe = "lot signé relu en cache";
   if (!batch && endpoint) {
     try {
       const response = await fetch(endpoint, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(2500) });
@@ -123,27 +182,12 @@ export async function inspectHubYoutubeCoverage(verifiedExport?: HubBatch) {
   } else if (!batch) {
     probe = "unconfigured";
   }
-  const finishedAt = batch?.finished_at ? Date.parse(batch.finished_at) : NaN;
   const channels = await Promise.all([...hearthstone.values()].map(async (channel) => {
-    const candidate = coveredVideos(batch, channel.channelId);
     try {
-      const atom = await readYoutubeAtom(channel);
-      const candidateIds = new Set(candidate.map(({ id }) => id));
-      const atomIds = new Set(atom.map(({ url }) => extractYoutubeVideoId(url)));
-      return {
-        source: channel.id,
-        hubCount: candidate.length,
-        atomCount: atom.length,
-        equivalent: batch && atom.length === cardsPerChannel
-          ? candidateIds.size === cardsPerChannel && atomIds.size === cardsPerChannel &&
-            [...atomIds].every((id) => id !== null && candidateIds.has(id))
-          : null,
-        publishedAfterHub: Number.isFinite(finishedAt)
-          ? atom.filter(({ date }) => Date.parse(date) > finishedAt).length
-          : null,
-      };
+      return compareYoutubeCoverage(batch, channel, await readYoutubeAtom(channel));
     } catch (error) {
-      return { source: channel.id, hubCount: candidate.length, atomCount: null, equivalent: null, error: safeDiagnostic(error) };
+      return { source: channel.id, hubCount: coveredVideos(batch, channel.channelId).length,
+        atomCount: null, equivalent: null, error: safeDiagnostic(error) };
     }
   }));
   return {
@@ -156,7 +200,8 @@ export async function inspectHubYoutubeCoverage(verifiedExport?: HubBatch) {
 
 export async function includeHubYoutube(archived: WatchItem[], limit: number, options: { theme?: string; query?: string; history?: boolean } = {}): Promise<WatchItem[]> {
   const { theme = "", query = "", history = false } = options;
-  if (process.env.VIGIE_HUB_REUSE !== "true" || (theme && theme !== "Hearthstone")) return archived;
+  if (process.env.VIGIE_HUB_REUSE !== "true" || process.env.VIGIE_HUB_OBSERVE === "true" ||
+      (theme && theme !== "Hearthstone")) return archived;
   const batch = await readHubYoutube();
   if (!batch) return archived;
   const terms = query.trim().toLowerCase();

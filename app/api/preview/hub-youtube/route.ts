@@ -1,4 +1,4 @@
-import { inspectHubYoutubeCoverage, verifyHubYoutubeExport } from "@/lib/youtube-collection";
+import { cacheHubYoutubeExport, inspectHubYoutubeCoverage, readHubYoutubeEnvelope } from "@/lib/youtube-collection";
 
 export const dynamic = "force-dynamic";
 
@@ -8,7 +8,7 @@ const exportForm = `<!doctype html>
 <main><h1>Vérifier un lot signé du Hub</h1>
 <form method="post"><label for="export">Lot signé du Hub</label><br>
 <textarea id="export" name="export" rows="8" cols="64" required></textarea><br>
-<button type="submit">Comparer aux flux YouTube</button></form></main></html>`;
+<button type="submit">Déposer le lot</button></form></main></html>`;
 
 export async function GET(request: Request) {
   if (process.env.VERCEL_ENV !== "preview") return new Response(null, { status: 404 });
@@ -20,18 +20,11 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   if (process.env.VERCEL_ENV !== "preview") return new Response(null, { status: 404 });
-  if (Number(request.headers.get("content-length")) > 512 * 1024) return new Response(null, { status: 413 });
-  let envelope: unknown;
   try {
-    const text = await request.text();
-    if (text.length > 512 * 1024) return new Response(null, { status: 413 });
-    const body = request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")
-      ? new URLSearchParams(text).get("export") : text;
-    envelope = body ? JSON.parse(body) : null;
+    const lot = await cacheHubYoutubeExport(await readHubYoutubeEnvelope(request));
+    if (!lot) return Response.json({ error: "Signature ou lot invalide." }, { status: 422, headers: noCache });
+    return Response.json({ state: "lot vérifié et déposé", id: lot.run_id, finishedAt: lot.finished_at }, { status: 202, headers: noCache });
   } catch {
-    return Response.json({ error: "Lot illisible." }, { status: 400, headers: noCache });
+    return Response.json({ error: "Cache de Preview indisponible." }, { status: 503, headers: noCache });
   }
-  const lot = verifyHubYoutubeExport(envelope);
-  if (!lot) return Response.json({ error: "Signature ou lot invalide." }, { status: 422, headers: noCache });
-  return Response.json(await inspectHubYoutubeCoverage(lot), { headers: noCache });
 }
