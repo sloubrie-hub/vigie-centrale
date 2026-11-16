@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
 import {
-  cacheHubYoutubeExport, createYoutubeTasks, inspectHubYoutubeCoverage, youtubeChannels,
+  cacheHubYoutubeExport, createYoutubeTasks, inspectHubYoutubeCoverage, readYoutubeCoverage, youtubeChannels,
 } from "../lib/youtube-collection.ts";
 
 test("le lot signé est relu en cache et le mode observation garde la référence Atom", async (t) => {
@@ -60,10 +60,13 @@ test("le lot signé est relu en cache et le mode observation garde la référenc
     const entries = items.map((item) => `<entry><yt:videoId>${item.id}</yt:videoId><title>${item.title}</title><published>${item.published_at}</published></entry>`).join("");
     return new Response(`<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">${entries}</feed>`);
   });
-  const collect = () => Promise.all(createYoutubeTasks((id) => ({ id })).map((task) => task.run()));
+  const collect = () => Promise.all(createYoutubeTasks((id) => ({ id })).map((task) => task.run("collecte-reference")));
   const first = await collect();
   assert.equal(atomRequests.length, 7);
   assert.equal(first.flatMap(({ items }) => items).length, 14);
+  const proof = await readYoutubeCoverage();
+  assert.equal(proof.length, 4);
+  assert.ok(proof.every((row) => row.collectionRunId === "collecte-reference" && row.equivalent));
 
   late = true;
   const check = await inspectHubYoutubeCoverage();

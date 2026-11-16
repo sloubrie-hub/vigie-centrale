@@ -1,5 +1,5 @@
 import { verify as verifySignature } from "node:crypto";
-import { getCache } from "@vercel/functions";
+import { getCache, waitUntil } from "@vercel/functions";
 import { extractYoutubeVideoId } from "./archive-identity.ts";
 import { publishAll, type CollectorTask } from "./collector-runner.ts";
 import { requestText, safeDiagnostic } from "./http-client.ts";
@@ -140,13 +140,34 @@ function compareYoutubeCoverage(batch: HubBatch | null, channel: YoutubeChannel,
   };
 }
 
+function recordYoutubeCoverage(batch: HubBatch | null, channel: YoutubeChannel, atom: WatchItem[] | null, collectionRunId?: string) {
+  const comparison = atom ? compareYoutubeCoverage(batch, channel, atom) : {
+    source: channel.id, hubCount: coveredVideos(batch, channel.channelId).length,
+    atomCount: null, equivalent: null, publishedAfterHub: null,
+  };
+  const record = { observedAt: new Date().toISOString(), collectionRunId: collectionRunId ?? null,
+    hubFinishedAt: batch?.finished_at ?? null, ...comparison };
+  console.info(JSON.stringify({ event: "hub-youtube-coverage", hubRunId: batch?.run_id ?? null, ...record }));
+  if (collectionRunId) {
+    waitUntil(Promise.resolve().then(() => getCache().set(`${hubCacheKey()}:coverage:${channel.id}`, record, { ttl: 8 * 86400 }))
+      .catch(() => console.warn("La comparaison YouTube n’a pas pu être conservée.")));
+  }
+}
+
+export async function readYoutubeCoverage(date = new Date()) {
+  const cache = getCache();
+  const key = hubCacheKey(date);
+  const results = await Promise.allSettled([...hearthstone.values()].map(({ id }) => cache.get(`${key}:coverage:${id}`)));
+  return results.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+}
+
 export function createYoutubeTasks(sourceFor: (id: string) => SourceDefinition): CollectorTask[] {
   const reuse = process.env.VIGIE_HUB_REUSE === "true";
   const observe = process.env.VIGIE_HUB_OBSERVE === "true";
   let sharedBatch: Promise<HubBatch | null> | undefined;
   return youtubeChannels.map((channel) => ({
     source: sourceFor(channel.id),
-    run: async () => {
+    run: async (collectionRunId) => {
       const readsHub = channel.theme === "Hearthstone" && (reuse || observe);
       const batch = readsHub ? await (sharedBatch ??= readHubYoutube()) : null;
       if (reuse && !observe && batch) {
@@ -156,11 +177,11 @@ export function createYoutubeTasks(sourceFor: (id: string) => SourceDefinition):
           return { items: [], itemsCollected: videos.length };
         }
       }
-      const items = await readYoutubeAtom(channel);
-      if (observe && readsHub) {
-        console.info(JSON.stringify({ event: "hub-youtube-coverage", runId: batch?.run_id ?? null,
-          finishedAt: batch?.finished_at ?? null, ...compareYoutubeCoverage(batch, channel, items) }));
-      }
+      const items = await readYoutubeAtom(channel).catch((error) => {
+        if (observe && readsHub) recordYoutubeCoverage(batch, channel, null, collectionRunId);
+        throw error;
+      });
+      if (observe && readsHub) recordYoutubeCoverage(batch, channel, items, collectionRunId);
       return publishAll(items);
     },
   }));

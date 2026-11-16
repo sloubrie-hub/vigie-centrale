@@ -9,7 +9,7 @@ export type CollectorOutput = {
 };
 export type CollectorTask = {
   source: SourceDefinition;
-  run: () => Promise<CollectorOutput>;
+  run: (collectionRunId?: string) => Promise<CollectorOutput>;
   timeoutMs?: number;
 };
 export type CollectorTaskResult = {
@@ -60,7 +60,7 @@ async function executeTask(task: CollectorTask, collectionRunId: string, record:
   let output: CollectorOutput = { items: [], itemsCollected: 0 };
   let errorMessage: string | undefined;
   try {
-    output = await withSourceTimeout(Promise.resolve().then(task.run), task.timeoutMs ?? SOURCE_TIMEOUT_MS);
+    output = await withSourceTimeout(Promise.resolve().then(() => task.run(collectionRunId)), task.timeoutMs ?? SOURCE_TIMEOUT_MS);
     if (!Number.isInteger(output.itemsCollected) || output.itemsCollected < output.items.length) {
       throw new CollectorDiagnosticError("Métriques collecteur invalides", "invalid_response");
     }
